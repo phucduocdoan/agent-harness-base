@@ -10,8 +10,8 @@ muốn tra cứu. Comment trong code có dòng "Đối chiếu: …" trỏ tới
 
 | | |
 |---|---|
-| `how-to-learn.md` | Thứ tự đọc, không đọc repo từ đầu đến cuối |
-| `deepseek_harness_cordis_study_notes.md` | Ghi chú kiến trúc: Cordis runtime + core packages |
+| [`docs/how-to-learn.md`](docs/how-to-learn.md) | Thứ tự đọc, không đọc repo từ đầu đến cuối |
+| [`docs/deepseek_harness_cordis_study_notes.md`](docs/deepseek_harness_cordis_study_notes.md) | Ghi chú kiến trúc: Cordis runtime + core packages |
 | `mini-harness/` | Bản Python tối giản, tự viết |
 
 ## mini-harness
