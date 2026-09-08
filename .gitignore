@@ -1,0 +1,20 @@
+# Secret: provider credential đọc từ đây, không bao giờ commit.
+.env
+.env.*
+
+# Repo gốc để đọc/đối chiếu: là repo public riêng
+# (github.com/deepseek-ai/deepseek-harness, MIT) và có .git riêng.
+deepseek-harness/
+
+# Session log do harness ghi ra khi chạy `--session`.
+*.jsonl
+
+# Sandbox: nơi tool write_file ghi file, tạo lại được.
+sandbox/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/

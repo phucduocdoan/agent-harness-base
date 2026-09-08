@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Test nằm hết trong tests/, và import package bằng đường dẫn tuyệt đối
+# (`mini_harness.core.loop`) nên cần root của project trên sys.path.
+testpaths = ["tests"]
+pythonpath = ["."]
