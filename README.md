@@ -12,9 +12,9 @@ muốn tra cứu. Comment trong code có dòng "Đối chiếu: …" trỏ tới
 |---|---|
 | [`docs/how-to-learn.md`](docs/how-to-learn.md) | Thứ tự đọc, không đọc repo từ đầu đến cuối |
 | [`docs/deepseek_harness_cordis_study_notes.md`](docs/deepseek_harness_cordis_study_notes.md) | Ghi chú kiến trúc: Cordis runtime + core packages |
-| `mini-harness/` | Bản Python tối giản, tự viết |
+| `mini_harness/`, `tests/` | Bản Python tối giản, tự viết |
 
-## mini-harness
+## Harness tối giản
 
 ```
 mini_harness/
@@ -33,14 +33,13 @@ là **event log append-only**; message list gửi cho model là thứ *phái sin
 ### Chạy
 
 ```bash
-cd mini-harness
 python3 -m mini_harness --azure                     # chat mode
 python3 -m mini_harness --azure "100 * 1.1 = ?"     # một câu rồi thoát
 python3 -m mini_harness --azure --session run.jsonl # ghi/resume event log
 python3 -m pytest -q
 ```
 
-Credential đọc từ `.env` ở thư mục cha (không commit):
+Credential đọc từ `.env` ở gốc repo (không commit):
 `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_API_VERSION`,
 `AZURE_OPENAI_DEPLOYMENT` — hoặc `DEEPSEEK_API_KEY` cho `--deepseek`.
 

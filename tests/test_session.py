@@ -11,7 +11,7 @@ from mini_harness.core.session import ABORTED_BEFORE_DISPATCH, Session
 
 
 def _session_with_one_tool_round() -> Session:
-    """Đúng chuỗi event mà agent_loop.run_turn() ghi cho 1 vòng tool call."""
+    """Đúng chuỗi event mà run_turn() ghi cho 1 vòng tool call."""
     session = Session()
     session.append({"type": "user", "content": "100*1.1 bằng mấy?"})
     session.append({

@@ -28,7 +28,7 @@ from mini_harness.tools.calculator import calculator_tool
 from mini_harness.tools.registry import Approver, ToolRegistry
 from mini_harness.tools.write_file import write_file_tool
 
-# Thư mục gốc của project (package nằm trong nó).
+# Thư mục gốc của project (package nằm trong nó, .env nằm cạnh package).
 ROOT = Path(__file__).resolve().parent.parent
 SANDBOX = ROOT / "sandbox"
 
@@ -59,7 +59,7 @@ def build_tools(approver: Approver | None = None) -> ToolRegistry:
 
 
 async def main() -> int:
-    load_dotenv(ROOT.parent / ".env")
+    load_dotenv(ROOT / ".env")
     argv = sys.argv[1:]
 
     session_path: Path | None = None

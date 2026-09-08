@@ -26,7 +26,7 @@ ABORTED_BEFORE_DISPATCH = "Error: tool call aborted before dispatch"
 class Session:
     """Log append-only các event của một hội thoại.
 
-    Hiện thực Session Protocol trong agent_loop.py. Không validate event: agent
+    Hiện thực Session Protocol trong core/loop.py. Không validate event: agent
     loop là caller duy nhất và nó tự biết mình ghi gì.
     """
 

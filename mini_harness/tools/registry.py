@@ -1,6 +1,6 @@
 """Tool registry: khai báo tool, compile schema, validate args, chạy tool.
 
-File này là implementation của Protocol `Tools` trong agent_loop.py. Nó import
+File này là implementation của Protocol `Tools` trong core/loop.py. Nó import
 `ToolResult` từ đó (loop sở hữu các type đi qua biên) và KHÔNG bị import ngược lại.
 
 Hai bất biến của file:
@@ -127,7 +127,7 @@ Approver = Callable[[str, dict[str, Any]], Awaitable[str | None]]
 
 
 class ToolRegistry:
-    """Tập tool visible của một agent. Khớp Protocol `Tools` trong agent_loop.py."""
+    """Tập tool visible của một agent. Khớp Protocol `Tools` trong core/loop.py."""
 
     def __init__(self, *, approver: Approver | None = None) -> None:
         self._tools: dict[str, ToolDefinition] = {}

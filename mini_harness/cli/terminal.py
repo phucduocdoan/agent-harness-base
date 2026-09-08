@@ -15,7 +15,7 @@ from typing import Any
 class TerminalStream:
     """In text của model ra ngay khi từng mảnh tới.
 
-    Thuần hiển thị: không ai quyết định gì dựa trên nó, và `agent_loop.py`
+    Thuần hiển thị: không ai quyết định gì dựa trên nó, và `core/loop.py`
     không biết nó tồn tại. Nhãn `assistant: ` in lười — bước nào model chỉ gọi
     tool mà không nói gì thì không in nhãn rỗng.
     """
@@ -50,6 +50,8 @@ async def ask_terminal(name: str, args: dict[str, Any]) -> str | None:
 
 _STDIN: asyncio.StreamReader | None = None
 _STDIN_FLAGS: int | None = None
+# fd SỐ NGUYÊN, không phải object `sys.stdin`: xem `restore_stdin`.
+_STDIN_FD: int | None = None
 
 
 def restore_stdin() -> None:
@@ -59,9 +61,19 @@ def restore_stdin() -> None:
     CHUNG với shell cha và cờ không tự khôi phục khi process thoát -> shell
     sau đó báo "read error: Resource temporarily unavailable". Với stdin là
     pipe thì vô hại, nên bug này chỉ lộ ra khi chạy thật trên TTY.
+
+    Phải dùng fd số nguyên, KHÔNG dùng `sys.stdin`: khi stdin là pipe, sau khi
+    đọc xong dòng cuối thì reader callback vẫn còn đăng ký trên fd 0, epoll
+    (level-triggered) tiếp tục báo readable vì đã EOF, nên event loop tự chạy
+    `_read_ready` một vòng nữa, đọc `b''`, và transport tự đóng — đóng luôn
+    chính object `sys.stdin` đã truyền vào `connect_read_pipe`
+    (asyncio/unix_events.py: `_call_connection_lost` -> `self._pipe.close()`).
+    Tất cả xảy ra SAU khi `main()` return. May là CPython mở sys.stdin với
+    `closefd=False`, nên đóng object không đóng fd 0 ở tầng OS: cờ vẫn cần trả
+    lại, và trả qua số fd thì vẫn được, còn qua object thì `ValueError`.
     """
     if _STDIN_FLAGS is not None:
-        fcntl.fcntl(sys.stdin, fcntl.F_SETFL, _STDIN_FLAGS)
+        fcntl.fcntl(_STDIN_FD, fcntl.F_SETFL, _STDIN_FLAGS)
 
 
 async def read_line() -> str:
@@ -72,9 +84,10 @@ async def read_line() -> str:
     -> Ctrl-C ở prompt approval làm process treo vĩnh viễn. Nối stdin vào loop
     thì huỷ nhả được ngay.
     """
-    global _STDIN, _STDIN_FLAGS
+    global _STDIN, _STDIN_FLAGS, _STDIN_FD
     if _STDIN is None:
-        _STDIN_FLAGS = fcntl.fcntl(sys.stdin, fcntl.F_GETFL)
+        _STDIN_FD = sys.stdin.fileno()
+        _STDIN_FLAGS = fcntl.fcntl(_STDIN_FD, fcntl.F_GETFL)
         _STDIN = asyncio.StreamReader()
         await asyncio.get_running_loop().connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(_STDIN), sys.stdin

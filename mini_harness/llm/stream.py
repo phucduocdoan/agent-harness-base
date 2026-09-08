@@ -27,7 +27,7 @@ def to_wire_tools(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # Loop cần một AssistantMessage HOÀN CHỈNH mới quyết định được (còn tool call
 # hay không), nên stream phải gộp lại trước khi generate() trả về. Vì vậy
 # streaming KHÔNG đổi contract của loop: nó chỉ thêm một kênh hiển thị chạy
-# song song. `agent_loop.py` không biết provider có stream hay không.
+# song song. `core/loop.py` không biết provider có stream hay không.
 # Đối chiếu: AssistantStreamAccumulator ở core/agent-loop/src/assistant-stream.ts.
 
 # Nhận từng mảnh text ngay khi nó tới. Chỉ để hiển thị — không ai quyết định gì
