@@ -1,5 +1,9 @@
 # Bài tập: `ReplayLLM` — chạy harness không cần API key
 
+> **Trạng thái: đã có lời giải** trong `mini_harness/llm/replay.py`, nên phần gợi ý bên dưới
+> chỉ còn dùng để đối chiếu. Phần đáng đọc là mục "Đây không phải bài tập bịa" và gợi ý 3
+> (giới hạn: log không dựng lại được đường lỗi) — cả hai vẫn đúng nguyên.
+
 ## Đây không phải bài tập bịa
 
 Replay có thật trong harness gốc, ở **ba** tầng khác nhau. Kiểm tra được:

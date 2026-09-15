@@ -24,6 +24,7 @@ from mini_harness.core.loop import run_turn
 from mini_harness.core.session import Session
 from mini_harness.llm.azure import AzureLLM
 from mini_harness.llm.deepseek import DeepSeekLLM
+from mini_harness.llm.replay import ReplayLLM
 from mini_harness.tools.calculator import calculator_tool
 from mini_harness.tools.registry import Approver, ToolRegistry
 from mini_harness.tools.write_file import write_file_tool
@@ -38,6 +39,9 @@ SYSTEM = (
 )
 
 # Provider nào tồn tại: khai báo ở đây, một chỗ duy nhất.
+# ReplayLLM không nằm trong dict này vì cờ của nó ĂN MỘT GIÁ TRỊ (`--replay
+# <log>`), còn dict này ánh xạ cờ-không-giá-trị -> class dựng bằng `on_text`.
+# Nhét nó vào đây thì phải thêm một nhánh đặc biệt lúc dựng, dài hơn là để riêng.
 PROVIDERS = {
     "--azure": AzureLLM,
     "--deepseek": DeepSeekLLM,
@@ -71,17 +75,34 @@ async def main() -> int:
         session_path = Path(argv[index + 1])
         del argv[index : index + 2]
 
+    replay_path: Path | None = None
+    if "--replay" in argv:
+        index = argv.index("--replay")
+        if index + 1 >= len(argv):
+            print("--replay cần một đường dẫn log", file=sys.stderr)
+            return 1
+        replay_path = Path(argv[index + 1])
+        if not replay_path.exists():
+            print(f"không có log để phát lại: {replay_path}", file=sys.stderr)
+            return 1
+        del argv[index : index + 2]
+
     flags = [arg for arg in argv if arg in PROVIDERS]
     rest = [arg for arg in argv if arg not in PROVIDERS]
-    if not flags:
-        print(f"cần chọn provider: {' | '.join(PROVIDERS)}", file=sys.stderr)
+    if not flags and replay_path is None:
+        print(f"cần chọn provider: {' | '.join(PROVIDERS)} | --replay <log>",
+              file=sys.stderr)
         return 1
 
     # Không truyền câu hỏi -> chat mode.
     question: str | None = rest[0] if rest else None
     display = TerminalStream()
     try:
-        llm: Any = PROVIDERS[flags[0]](on_text=display)
+        llm: Any = (
+            ReplayLLM(replay_path, on_text=display)
+            if replay_path is not None
+            else PROVIDERS[flags[0]](on_text=display)
+        )
     except RuntimeError as error:
         print(f"không dựng được provider: {error}", file=sys.stderr)
         return 1

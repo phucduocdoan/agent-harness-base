@@ -36,6 +36,7 @@ là **event log append-only**; message list gửi cho model là thứ *phái sin
 python3 -m mini_harness --azure                     # chat mode
 python3 -m mini_harness --azure "100 * 1.1 = ?"     # một câu rồi thoát
 python3 -m mini_harness --azure --session run.jsonl # ghi/resume event log
+python3 -m mini_harness --replay run.jsonl          # phát lại log cũ, không cần API key
 python3 -m pytest -q
 ```
 
