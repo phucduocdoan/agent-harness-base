@@ -178,3 +178,42 @@ async def test_sigint_at_the_prompt_exits_with_130() -> None:
         display=TerminalStream(), read_line=read_line,
     )
     assert code == 130
+
+
+# ------------------------------------------------- lỗi provider giữa một turn
+# Bản thân việc retry transient đã nằm trong openai SDK (2 lần, backoff có
+# jitter, tôn trọng Retry-After). Nhưng SDK ngừng retry khi stream ĐÃ bắt đầu,
+# và lỗi lúc đó là `httpx.RemoteProtocolError` — không phải `openai.APIError`.
+# Nó đi xuyên mọi handler và giết cả vòng chat. Đó là cái test này giữ.
+
+
+class _FailsOnce:
+    """Nổ ở lần generate đầu, lần sau trả lời bình thường."""
+
+    def __init__(self, error: Exception, then: AssistantMessage) -> None:
+        self._error = error
+        self._then = then
+        self.calls = 0
+
+    async def generate(self, **_kwargs: Any) -> AssistantMessage:
+        self.calls += 1
+        if self.calls == 1:
+            raise self._error
+        return self._then
+
+
+@pytest.mark.asyncio
+async def test_provider_error_kills_the_turn_not_the_session() -> None:
+    session = Session()
+    # Cố ý dùng exception LẠ: `cli/` không được phép biết openai hay httpx là
+    # gì, nên nó phải sống sót trước loại lỗi nó chưa từng nghe tên.
+    llm = _FailsOnce(RuntimeError("peer closed connection"), AssistantMessage(text="ừ"))
+    code = await chat(**_chat_kwargs(llm, session, "câu hỏng", "câu lành", "/quit"))
+
+    assert code == 0, "một turn lỗi không được làm sập REPL"
+    assert llm.calls == 2, "turn sau vẫn phải chạy"
+    # Turn hỏng chỉ để lại event `user` — assistant chưa bao giờ về nên không
+    # có gì để ghi. Log vẫn hợp lệ, resume được.
+    assert [event["type"] for event in session.events] == [
+        "user", "user", "assistant",
+    ]

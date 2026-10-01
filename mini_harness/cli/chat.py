@@ -132,6 +132,19 @@ async def chat(
                 # Hết step là hết của MỘT turn, không phải hết của session.
                 print(f"(dừng: {error})")
                 continue
+            except Exception as error:
+                # Bắt RỘNG, có chủ ý. Hẹp lại thì file này phải import openai
+                # và httpx để gọi tên exception — tức là phá đúng cái seam
+                # đang giữ: `cli/` không được biết provider nào tồn tại. Mà
+                # hẹp cũng không đủ: lỗi đứt stream là `httpx.RemoteProtocol
+                # Error`, không nằm trong cây `openai.APIError`.
+                # Đổi lại, in kèm TÊN LỚP để không có lỗi nào chết im lặng.
+                # `asyncio.CancelledError` kế thừa BaseException nên không rơi
+                # vào đây — Ctrl-C vẫn đi đúng nhánh của nó ở trên.
+                display.close()
+                print(f"(lỗi {type(error).__name__}: {error} — turn bỏ dở, "
+                      f"session vẫn giữ)")
+                continue
             finally:
                 current = None
 
