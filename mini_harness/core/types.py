@@ -36,6 +36,14 @@ class AssistantMessage:
 
     text: str = ""
     tool_calls: tuple[ToolCall, ...] = field(default_factory=tuple)
+    # Số token của REQUEST đã sinh ra lượt trả lời này, do API tự báo. Không
+    # phải thuộc tính của câu trả lời, nhưng đây là chỗ duy nhất nó về được:
+    # một lần `generate` trả về đúng một message.
+    #
+    # `None` là hợp lệ và phải chịu được: provider có thể không báo usage, và
+    # ReplayLLM thì không có request nào để mà đo. Thiếu số thật thì tầng trên
+    # quay về ước lượng, không crash.
+    prompt_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,7 +11,7 @@ import pytest
 
 from mini_harness.profiles import RESEARCH
 from mini_harness.tools.registry import ToolRegistry
-from mini_harness.tools.web_search import _MAX_RAW_CHARS, _format, web_search_tool
+from mini_harness.tools.web_search import _format, web_search_tool
 
 
 def _registry() -> ToolRegistry:
@@ -64,11 +64,15 @@ def test_fetch_content_mode_dung_raw_content():
     assert "đầy đủ" in out
 
 
-def test_raw_content_dai_bi_cat_va_noi_ra_la_da_cat():
-    """Model phải phân biệt "trang nói có thế" với "trang bị cắt"."""
-    out = _format("q", [{"title": "T", "url": "U", "raw_content": "x" * (_MAX_RAW_CHARS + 500)}], True)
-    assert "truncated" in out
-    assert len(out) < _MAX_RAW_CHARS + 300
+def test_tool_tra_nguyen_van_khong_tu_cat():
+    """Tool KHÔNG sở hữu ngân sách: cắt là việc của `Session.to_messages()`.
+
+    Cắt ở đây là cắt trước khi vào log, tức là huỷ bản gốc vĩnh viễn. Test này
+    khoá cứng điều đó lại — xem tests/test_compaction.py cho phía cắt.
+    """
+    body = "x" * 50_000
+    out = _format("q", [{"title": "T", "url": "U", "raw_content": body}], True)
+    assert body in out
 
 
 def test_raw_content_null_roi_ve_snippet():

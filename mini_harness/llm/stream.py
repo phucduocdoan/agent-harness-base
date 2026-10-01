@@ -44,8 +44,16 @@ class StreamAccumulator:
         # index -> mảnh đang gom. Dùng dict thay vì list vì delta có thể tới
         # không theo thứ tự index.
         self._calls: dict[int, dict[str, str]] = {}
+        self._prompt_tokens: int | None = None
 
     def feed(self, chunk: Any) -> None:
+        # Usage tới ở MỘT chunk riêng gần cuối stream, và chunk đó có `choices`
+        # rỗng — nên nó phải được đọc trước vòng lặp dưới, không phải trong.
+        # `getattr` vì chunk thường không có field này; `if usage` vì một số
+        # provider gửi `usage=None` ở mọi chunk cho tới chunk cuối.
+        usage = getattr(chunk, "usage", None)
+        if usage is not None:
+            self._prompt_tokens = usage.prompt_tokens
         # `choices` rỗng là hợp lệ: Azure gửi một chunk đầu chỉ chứa kết quả
         # content filter của prompt.
         for choice in chunk.choices or ():
@@ -82,6 +90,7 @@ class StreamAccumulator:
                 ToolCall(id=slot["id"], name=slot["name"], arguments_json=slot["arguments"])
                 for _index, slot in sorted(self._calls.items())
             ),
+            prompt_tokens=self._prompt_tokens,
         )
 
 
@@ -100,6 +109,11 @@ async def generate_streamed(
         model=model,
         messages=[{"role": "system", "content": system}, *messages],
         stream=True,
+        # Xin API báo lại số token nó THẬT SỰ đọc. Ở chế độ stream phải xin
+        # tường minh, vì mặc định stream không trả usage. Số này là cái neo
+        # duy nhất để sửa sai số của bộ đoán ở tầng trên; xem
+        # `Session._calibrate`.
+        stream_options={"include_usage": True},
         # Gửi `tools=[]` là lỗi ở một số provider; không có tool thì bỏ hẳn key.
         **({"tools": to_wire_tools(tools)} if tools else {}),
     )

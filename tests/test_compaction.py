@@ -93,3 +93,134 @@ def test_message_list_luon_bat_dau_bang_user() -> None:
     events = _flat(*[_turn(tag, size=300, with_tool=True) for tag in "abcd"])
     session = Session(events=events, max_tokens=800)
     assert session.to_messages()[0]["role"] == "user"
+
+
+# ------------------------------------------------- cắt ruột một tool result
+
+
+def _tool_turn(tag: str, content: str) -> list[dict]:
+    """Một turn có đúng một tool result mang `content`."""
+    return [
+        {"type": "user", "content": f"hỏi {tag}"},
+        {"type": "assistant", "content": "", "tool_calls": [
+            {"id": f"call_{tag}", "name": "web_search", "arguments": '{"query": "x"}'}]},
+        {"type": "tool_result", "call_id": f"call_{tag}", "name": "web_search",
+         "content": content, "is_error": False},
+        {"type": "assistant", "content": f"đáp {tag}", "tool_calls": []},
+    ]
+
+
+def _tool_message(session: Session) -> dict:
+    (message,) = [m for m in session.to_messages() if m["role"] == "tool"]
+    return message
+
+
+def test_tool_result_duoi_tran_khong_bi_dong_vao() -> None:
+    events = _tool_turn("a", "ngắn thôi")
+    session = Session(events=events, max_tool_result_chars=1_000)
+    assert _tool_message(session)["content"] == "ngắn thôi"
+
+
+def test_tool_result_qua_kho_giu_dau_va_duoi() -> None:
+    """Giữ cả đuôi, không cắt cụt: kết luận của một trang nằm ở cuối."""
+    body = "ĐẦU" + "x" * 50_000 + "ĐUÔI"
+    session = Session(events=_tool_turn("a", body), max_tool_result_chars=1_000)
+    content = _tool_message(session)["content"]
+
+    assert content.startswith("ĐẦU")
+    assert content.endswith("ĐUÔI")
+    assert len(content) < 1_300, "giữ gần đúng trần, cộng marker"
+
+
+def test_cat_roi_thi_phai_noi_ra_la_da_cat() -> None:
+    """Im lặng thì model đọc một kết quả cụt như thể nó đầy đủ."""
+    session = Session(events=_tool_turn("a", "x" * 50_000), max_tool_result_chars=1_000)
+    content = _tool_message(session)["content"]
+    assert "pruned" in content
+    assert str(50_000 - 1_000) in content, "phải nói mất bao nhiêu ký tự"
+
+
+def test_log_van_giu_ban_day_du_sau_khi_chieu() -> None:
+    """Đây là lý do việc cắt phải nằm ở phép chiếu chứ không ở trong tool."""
+    body = "x" * 50_000
+    session = Session(events=_tool_turn("a", body), max_tool_result_chars=1_000)
+    session.to_messages()
+    (event,) = [e for e in session.events if e["type"] == "tool_result"]
+    assert event["content"] == body
+
+
+def test_cat_ruot_chay_truoc_khi_bo_turn() -> None:
+    """Thứ tự quan trọng: cắt trước thì không phải vứt turn nào cả.
+
+    Nếu `_estimate` đếm tool result ở cỡ ĐẦY ĐỦ (100k ký tự ≈ 40k token) thì
+    turn "a" chắc chắn bị bỏ. Cắt trước thì cả hai turn cùng vừa.
+    """
+    events = _flat(_turn("a"), _tool_turn("b", "x" * 100_000))
+    session = Session(events=events, max_tool_result_chars=1_000, max_tokens=2_000)
+    kept = [m.get("content") or "" for m in session.to_messages()]
+    assert any("hỏi a" in content for content in kept), "turn a không đáng bị bỏ"
+
+
+# ---------------------------------------------------- overhead đo từ `usage`
+
+
+def test_chua_do_duoc_gi_thi_ngan_sach_nhu_cu() -> None:
+    """Không provider nào báo usage thì hành vi phải y hệt trước đây."""
+    events = _flat(_turn("a", size=100), _turn("b", size=100))
+    session = Session(events=list(events), max_tokens=2_000)
+    assert len(session.to_messages()) == len(events)
+
+
+def test_usage_cua_api_lam_ngan_sach_chat_lai() -> None:
+    """System prompt + tool schema không nằm trong message list nhưng vẫn tốn chỗ.
+
+    Message list ở đây chỉ đoán ~260 token, mà API báo request thật tốn 2500.
+    Phần dư 2240 chính là hai thứ kia — và nó phải vào ngân sách, nếu không thì
+    harness tưởng còn thừa chỗ trong khi đã sát trần.
+    """
+    events = _flat(_turn("a", size=100), _turn("b", size=100))
+    session = Session(events=list(events), max_tokens=2_000)
+    session.append({"type": "assistant", "content": "", "tool_calls": [],
+                    "prompt_tokens": 2_500})
+
+    kept = [m.get("content") or "" for m in session.to_messages()]
+    assert not any("a" * 100 in content for content in kept), "turn cũ phải bị bỏ"
+    assert any("b" * 100 in content for content in kept), "turn mới nhất vẫn giữ"
+    # Và log thì không mất gì cả.
+    assert len(session.events) == len(events) + 1
+
+
+def test_prompt_tokens_none_thi_quay_ve_doan_thuan() -> None:
+    """ReplayLLM không có request nào để đo — không được vì thế mà hỏng."""
+    events = _flat(_turn("a", size=100))
+    session = Session(events=list(events), max_tokens=2_000)
+    session.append({"type": "assistant", "content": "x", "tool_calls": [],
+                    "prompt_tokens": None})
+    assert len(session.to_messages()) == len(events) + 1
+
+
+def test_log_cu_khong_co_field_prompt_tokens_van_doc_duoc() -> None:
+    """Log ghi trước thay đổi này không có key đó. `resume` phải chạy được."""
+    session = Session(events=[], max_tokens=2_000)
+    session.append({"type": "user", "content": "chào"})
+    session.append({"type": "assistant", "content": "ừ", "tool_calls": []})
+    assert len(session.to_messages()) == 2
+
+
+def test_hieu_chinh_duoc_phep_am() -> None:
+    """Bộ đoán cố ý đoán THỪA, nên hiệu chỉnh thường âm — và phải được phép âm.
+
+    Đo thật trên một phiên `research`: API báo 4147 token cho một message list
+    mà bộ đoán tự tính 6703. Chặn hiệu chỉnh ở 0 là vứt bỏ phép neo đúng lúc
+    nó cần nhất, và harness quay lại tin một con số cao hơn thực tế 60%.
+    """
+    events = _tool_turn("a", "x" * 15_000)
+    session = Session(events=list(events), max_tokens=60_000,
+                      max_tool_result_chars=20_000)
+    doan = session._guess(events)
+    assert doan > 4_000, "dựng test sai: phải đủ lớn để bộ đoán vọt lên"
+
+    session.append({"type": "assistant", "content": "", "tool_calls": [],
+                    "prompt_tokens": 4_147})
+    # Neo đúng: ước lượng của chính tập event vừa đo phải khớp số API báo.
+    assert session._estimate(session._for_model(events)) == 4_147

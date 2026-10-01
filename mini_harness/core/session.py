@@ -44,6 +44,12 @@ class Session:
     # `core/` không có quyền đoán cửa sổ của model nào). Chủ sở hữu con số này
     # là app.py — nó mới biết đang chạy provider nào.
     max_tokens: int | None = None
+    # Trần cho MỘT tool result khi chiếu. None = không cắt. Cũng do app.py sở
+    # hữu, cùng lý do với `max_tokens`. Xem `_prune_text` về việc cắt thế nào.
+    max_tool_result_chars: int | None = None
+    # Lượng hiệu chỉnh cho bộ đoán, học từ `usage` mà API trả về.
+    # 0 cho tới khi đo được lần đầu. Xem `_calibrate`.
+    _calibration: int = 0
 
     def append(self, event: dict[str, Any]) -> None:
         self.events.append(event)
@@ -55,6 +61,8 @@ class Session:
         # Đối chiếu luật "publish state only at its commit point".
         if self.on_event is not None:
             self.on_event(event)
+        if event["type"] == "assistant" and event.get("prompt_tokens"):
+            self._calibrate(event["prompt_tokens"])
 
     @classmethod
     def resume(cls, log_path: Path) -> Session:
@@ -109,41 +117,100 @@ class Session:
         ]
 
     # ------------------------------------------------------- ngân sách token
-    # Ước lượng THÔ, cố ý nghiêng về phía đoán thừa: đoán thiếu nghĩa là tưởng
-    # còn chỗ trong khi đã tràn — đúng cái crash đang muốn tránh. Đo bằng
+
+    def _calibrate(self, prompt_tokens: int) -> None:
+        """Neo bộ đoán vào số API thật, bằng một phép trừ.
+
+            hiệu chỉnh = số API báo  -  bộ đoán tự tính cho CÙNG tập event đó
+
+        `self.events[:-1]` chính là cái đã được chiếu đi gửi ở step này —
+        event assistant vừa append là câu trả lời cho nó. Tính lại ở đây thay
+        vì nhờ `to_messages()` ghi lại: phép chiếu giữ nguyên tính thuần, và
+        không ai phải nhớ thứ tự gọi giữa hai hàm.
+
+        Hệ quả: `_estimate` của đúng tập event vừa đo sẽ ra lại đúng
+        `prompt_tokens`. Mọi sai số đã bị hấp thụ, và chỉ phần event MỚI phát
+        sinh sau đó mới còn là số đoán — mà phần đó thì nhỏ, và lại được neo
+        lại ở step kế tiếp.
+
+        Con số này GỘP hai thứ ngược dấu nhau, và không tách ra được:
+          + phần request message list không nhìn thấy (system prompt, tool
+            schema) — luôn dương;
+          − sai số của chính bộ đoán — thường âm, vì `_CHARS_PER_TOKEN = 2.5`
+            cố ý đoán thừa, mà một tool result tiếng Anh thật thì ~4.9 ký tự
+            mỗi token.
+
+        Nên nó PHẢI được phép âm. Đo thật trên một phiên `research`: step đầu
+        +272 (đúng là system prompt + 3 tool schema), step sau −2556 sau khi
+        một tool result 15.8k ký tự vào log. Chặn ở 0 là vứt bỏ phép hiệu
+        chỉnh đúng lúc nó cần nhất.
+        """
+        self._calibration = prompt_tokens - self._guess(self._for_model(self.events[:-1]))
+
+    # Ước lượng THÔ, cố ý nghiêng về phía đoán thừa: chừng nào chưa có số đo
+    # nào thì đoán thiếu nghĩa là tưởng còn chỗ trong khi đã tràn. Đo bằng
     # tiktoken o200k_base: tiếng Anh 4.87 ký tự/token, tiếng Việt 3.35, JSON
     # 2.53. Lấy theo trường hợp tệ nhất.
     #
-    # Không import tiktoken ở đây dù nó chính xác hơn: `core/` mà biết
-    # tokenizer của một provider cụ thể là phá seam. Harness thật giải bằng
-    # cách khác và tốt hơn — đọc `usage` mà API TRẢ VỀ ở response trước, tức là
-    # số thật chứ không phải số đoán. Muốn nâng cấp thì đi đường đó.
+    # Không import tiktoken ở đây dù nó chính xác hơn: `core/` mà biết tokenizer
+    # của một provider cụ thể là phá seam. Và sau request đầu tiên thì không cần
+    # nữa — `_calibrate` neo cả bộ đoán này vào số API thật.
     _CHARS_PER_TOKEN = 2.5
     # Mỗi message còn tốn phần bao: role, delimiter của wire format.
     _TOKENS_PER_MESSAGE = 4
 
-    def _within_budget(self) -> list[dict[str, Any]]:
-        """Bỏ bớt turn cũ cho vừa `max_tokens`. KHÔNG sửa `self.events`."""
+    def _guess(self, events: list[dict[str, Any]]) -> int:
+        """Đoán số token của riêng phần event. Không cộng overhead."""
+        count = 0
+        for event in events:
+            text = json.dumps(event, ensure_ascii=False)
+            count += int(len(text) / self._CHARS_PER_TOKEN) + self._TOKENS_PER_MESSAGE
+        return count
+
+    def _estimate(self, events: list[dict[str, Any]]) -> int:
+        """Số token của CẢ request: số đoán đã hiệu chỉnh theo lần đo gần nhất."""
+        return self._calibration + self._guess(events)
+
+    def _for_model(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Chuỗi chính sách áp lên log trước khi chiếu. KHÔNG sửa `self.events`.
+
+        Thứ tự bắt buộc là cắt-ruột TRƯỚC, bỏ-turn SAU. Ngược lại thì
+        `_estimate` đếm tool result ở cỡ đầy đủ rồi vứt đi những turn mà sau
+        khi cắt vốn vẫn vừa chỗ — mất dữ liệu một cách oan uổng. Đối chiếu
+        compaction-tool-result-pruner: "Trimming makes no model call and can
+        clear token pressure on its own, so compaction may skip the summary
+        entirely."
+        """
+        return self._within_budget(self._pruned(events))
+
+    def _pruned(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Cắt ruột những tool result quá khổ."""
+        limit = self.max_tool_result_chars
+        if limit is None:
+            return events
+        return [
+            {**event, "content": _prune_text(event["content"], limit)}
+            if event["type"] == "tool_result" and len(event["content"]) > limit
+            else event
+            for event in events
+        ]
+
+    def _within_budget(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Bỏ bớt turn cũ cho vừa `max_tokens`."""
         if self.max_tokens is None:
-            return self.events
-        turns = _split_turns(self.events)
+            return events
+        turns = _split_turns(events)
+        kept = events
         # Bỏ TRỌN từng turn từ cũ nhất. Cắt lẻ từng event sẽ để lại
         # `tool_result` mồ côi không có `tool_call` đi kèm, và API từ chối
         # nguyên request — hỏng nặng hơn hẳn so với việc tràn cửa sổ.
-        while len(turns) > 1 and self._estimate(turns) > self.max_tokens:
+        while len(turns) > 1 and self._estimate(kept) > self.max_tokens:
             turns.pop(0)
+            kept = [event for turn in turns for event in turn]
         # Luôn giữ turn cuối cùng kể cả khi một mình nó đã vượt ngân sách: bỏ
         # nốt thì chẳng còn gì để hỏi model. Quá cỡ ở đây là việc của tầng
         # khác (cắt nhỏ chính câu hỏi), không phải của compaction.
-        return [event for turn in turns for event in turn]
-
-    def _estimate(self, turns: list[list[dict[str, Any]]]) -> int:
-        count = 0
-        for turn in turns:
-            for event in turn:
-                text = json.dumps(event, ensure_ascii=False)
-                count += int(len(text) / self._CHARS_PER_TOKEN) + self._TOKENS_PER_MESSAGE
-        return count
+        return kept
 
     def to_messages(self) -> list[dict[str, Any]]:
         """Chiếu log thành message list đúng wire format của OpenAI/DeepSeek.
@@ -151,12 +218,13 @@ class Session:
         Một chiều: event -> message. Không có đường ngược lại, và không sửa
         `self.events`. Gọi bao nhiêu lần cũng ra cùng kết quả.
 
-        Có `max_tokens` thì phép chiếu này LOSSY: turn cũ bị bỏ khỏi message
-        list, nhưng vẫn nằm nguyên trong log. Đó chính là lý do tách log khỏi
-        projection ngay từ đầu — cắt ngữ cảnh mà không mất dữ liệu.
+        Có ngân sách thì phép chiếu này LOSSY theo hai cách: turn cũ bị bỏ
+        hẳn, và tool result quá khổ bị cắt mất ruột. Cả hai đều chỉ xảy ra ở
+        ĐÂY — log vẫn giữ nguyên bản đầy đủ. Đó chính là lý do tách log khỏi
+        projection ngay từ đầu: cắt ngữ cảnh mà không mất dữ liệu.
         """
         messages: list[dict[str, Any]] = []
-        for event in self._within_budget():
+        for event in self._for_model(self.events):
             kind = event["type"]
             if kind == "user":
                 messages.append({"role": "user", "content": event["content"]})
@@ -210,3 +278,31 @@ def _split_turns(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
             turns.append([])
         turns[-1].append(event)
     return turns
+
+
+def _prune_text(text: str, limit: int) -> str:
+    """Giữ đầu và ĐUÔI của một tool result, nói rõ phần giữa đã mất.
+
+    Giữ cả đuôi chứ không cắt cụt: kết luận của một bài viết nằm ở cuối, và
+    thông báo lỗi của một lệnh dài cũng nằm ở cuối. Cắt cụt đuôi là bỏ đúng
+    phần hay mang câu trả lời.
+
+    Marker là model-facing text nên viết tiếng Anh, và phải nói ra con số: một
+    tool result bị cắt mà im lặng sẽ được model đọc như một kết quả đầy đủ.
+    Nó cũng là lời mời model thu hẹp truy vấn rồi gọi lại.
+
+    `limit` tính trên nội dung GỐC giữ lại; marker nằm ngoài con số đó.
+
+    Đối chiếu: compaction/compaction-tool-result-pruner — "trims each
+    over-budget tool result to a bounded head, a short 'middle pruned' marker,
+    and a bounded tail".
+    """
+    # Đầu nhiều hơn đuôi: phần mở đầu thường đã nói chủ đề là gì, còn đuôi chỉ
+    # cần đủ để thấy kết luận.
+    head = limit * 2 // 3
+    tail = limit - head
+    return (
+        text[:head]
+        + f"\n\n[... {len(text) - limit} characters pruned from the middle ...]\n\n"
+        + text[len(text) - tail:]
+    )

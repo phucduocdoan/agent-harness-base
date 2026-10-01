@@ -10,7 +10,17 @@ Ba thứ `calculator` và `write_file` chưa từng chạm, tool này chạm c�
   3. KÍCH THƯỚC OUTPUT — đây mới là phần đáng học. Một trang web thật đo được
      ~25k ký tự raw. Năm kết quả là ~125k ký tự ≈ 30k token, nhét vào MỘT tool
      result, trong khi ngân sách cả phiên ở `app.py` là 60k. Tức là một lần gọi
-     tool sai cách đủ ăn hết nửa cửa sổ. Vì vậy có `_MAX_RAW_CHARS`.
+     tool sai cách đủ ăn hết nửa cửa sổ.
+
+     Nhưng tool KHÔNG tự cắt: nó trả nguyên văn, và `Session.to_messages()` mới
+     là chỗ cắt (`max_tool_result_chars`). Hai lý do. Một, cắt ở đây là cắt
+     TRƯỚC khi vào log, tức là huỷ vĩnh viễn bản gốc — mất luôn khả năng đọc
+     lại và replay. Hai, trần phụ thuộc ngân sách của cả phiên và số tool đang
+     tranh chỗ, mà tool thì không biết cả hai. Cùng một luật đã áp cho
+     compaction: cắt ở phép chiếu, log giữ nguyên.
+
+     Cái tool VẪN sở hữu là `fetch_content` — quyền chọn gọi to hay gọi nhỏ.
+     Trần là lưới an toàn, không phải cơ chế chính.
 
 Đối chiếu: research_agent/tools/research.py của Research-Agents (LangChain).
 CỐ TÌNH không bê theo `BaseToolkit` của repo đó — đó là kế thừa, đúng cái pattern
@@ -27,27 +37,9 @@ from mini_harness.tools.registry import ToolDefinition, define_tool
 
 _ENDPOINT = "https://api.tavily.com/search"
 
-# Cắt raw content mỗi kết quả. Con số là một đánh đổi, không phải hằng số thiêng:
-# đủ dài để chứa phần đầu một bài viết (chỗ hay có câu trả lời), đủ ngắn để năm
-# kết quả vẫn vừa ngân sách. Cắt ở ĐÂY chứ không để `session.py` dọn sau: lúc
-# compaction chạy thì token đã bị tiêu rồi, nó chỉ cứu được các turn SAU.
-_MAX_RAW_CHARS = 4_000
-
 # Timeout của cả request. Không có nó thì một lần mạng treo = treo luôn cả turn,
 # và user chỉ còn cách Ctrl-C.
 _TIMEOUT_SECONDS = 25.0
-
-
-def _truncate(text: str) -> str:
-    """Cắt bớt và NÓI RA là đã cắt.
-
-    Câu đuôi là model-facing có chủ ý: model phải phân biệt được "trang này nói
-    có thế thôi" với "trang này còn nữa mà bị cắt" — nếu không nó sẽ kết luận
-    chắc nịch trên một nửa bài viết.
-    """
-    if len(text) <= _MAX_RAW_CHARS:
-        return text
-    return text[:_MAX_RAW_CHARS] + f"\n\n[truncated at {_MAX_RAW_CHARS} characters]"
 
 
 def _format(query: str, results: list[dict[str, Any]], fetch_content: bool) -> str:
@@ -67,7 +59,7 @@ def _format(query: str, results: list[dict[str, Any]], fetch_content: bool) -> s
         if fetch_content:
             # `raw_content` có thể là null khi Tavily không tải được trang —
             # rơi về snippet còn hơn trả một khối rỗng không giải thích gì.
-            body = _truncate(result.get("raw_content") or result.get("content") or "")
+            body = result.get("raw_content") or result.get("content") or ""
         else:
             body = result.get("content") or ""
         blocks.append(

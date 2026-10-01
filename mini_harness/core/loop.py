@@ -131,6 +131,10 @@ async def run_turn(
                 {"id": c.id, "name": c.name, "arguments": c.arguments_json}
                 for c in reply.tool_calls
             ],
+            # Số đo của request vừa rồi, ghi vào log như một phần của sự thật.
+            # Loop chỉ CHUYỂN nó, không diễn giải: nó không biết ngân sách là
+            # bao nhiêu, và cũng không nên biết.
+            "prompt_tokens": reply.prompt_tokens,
         })
 
         # Không còn tool call — model đã trả lời xong. Đây là điều kiện dừng duy nhất.

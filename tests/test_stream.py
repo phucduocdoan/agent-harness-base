@@ -103,3 +103,24 @@ def test_chunk_without_choices_is_ignored() -> None:
 def test_empty_string_content_does_not_break_accumulation() -> None:
     message = _fold([_chunk(text=""), _chunk(text="x"), _chunk(text=None)])
     assert message.text == "x"
+
+
+# ----------------------------------------------------------------- usage
+
+
+def _usage_chunk(prompt_tokens: int):
+    """Chunk usage tới gần cuối stream và KHÔNG có choices nào."""
+    return SimpleNamespace(
+        choices=[], usage=SimpleNamespace(prompt_tokens=prompt_tokens)
+    )
+
+
+def test_usage_chunk_mang_ve_so_token_that() -> None:
+    message = _fold([_chunk(text="ok"), _usage_chunk(1234)])
+    assert message.text == "ok"
+    assert message.prompt_tokens == 1234
+
+
+def test_khong_co_usage_thi_prompt_tokens_la_none() -> None:
+    """Provider không báo usage vẫn phải chạy — tầng trên quay về ước lượng."""
+    assert _fold([_chunk(text="ok")]).prompt_tokens is None

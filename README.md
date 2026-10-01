@@ -32,7 +32,10 @@ mini_harness/
 Session) rồi lái vòng lặp. Đổi provider hay thêm tool không cần sửa nó. Session
 là **event log append-only**; message list gửi cho model là thứ *phái sinh*
 (`to_messages()`) — đó là cái làm resume, replay và **compaction** khả thi: cắt
-ngữ cảnh cho vừa cửa sổ model là cắt ở phép chiếu, log vẫn nguyên vẹn.
+ngữ cảnh cho vừa cửa sổ model là cắt ở phép chiếu, log vẫn nguyên vẹn. Hai thứ
+bị cắt ở đó: turn cũ nhất, và ruột của tool result quá khổ (giữ đầu + đuôi, nói
+rõ mất bao nhiêu ký tự). Ngân sách không đoán suông — `usage` mà API trả về ở
+response trước được dùng để neo lại bộ ước lượng.
 
 Một **loại agent** (`general`, `tutor`, …) là *dữ liệu*, không phải class con:
 persona + tập tool. Thêm agent mới không sửa dòng nào trong `core/loop.py` hay

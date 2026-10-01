@@ -53,7 +53,15 @@ def print_log(session: Session) -> None:
                 f"{call['name']}({call['arguments']})" for call in event["tool_calls"]
             )
         print(f"{index}. {event['type']}{mark}: {detail}")
-    print(f"\n--- to_messages() gửi model: {len(session.to_messages())} message ---")
+    # In cả số API ĐO được bên cạnh số message: đó là cách duy nhất nhìn ra bộ
+    # đoán trong session lệch bao nhiêu so với thực tế.
+    measured = [
+        event["prompt_tokens"]
+        for event in session.events
+        if event["type"] == "assistant" and event.get("prompt_tokens")
+    ]
+    do_duoc = f", request cuối {measured[-1]} token (API đo)" if measured else ""
+    print(f"\n--- to_messages() gửi model: {len(session.to_messages())} message{do_duoc} ---")
 
 
 async def chat(

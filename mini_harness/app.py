@@ -39,14 +39,24 @@ from mini_harness.tools.write_file import write_file_tool
 ROOT = Path(__file__).resolve().parent.parent
 SANDBOX = ROOT / "sandbox"
 
-# Ngân sách token cho message list. Con số này ở ĐÂY chứ không ở core/ vì chỉ
+# Ngân sách token cho CẢ request. Con số này ở ĐÂY chứ không ở core/ vì chỉ
 # app.py mới biết đang chạy provider nào và cửa sổ của nó bao nhiêu.
 #
-# Để thấp hơn cửa sổ thật (128k của gpt-4o) rất nhiều, có chủ ý: bộ đếm trong
-# session chỉ là ước lượng, và nó KHÔNG đếm hai thứ cũng chiếm chỗ trong cùng
-# request — system prompt và tool schema. Phần dư là chỗ cho chúng cộng với
-# output model sắp sinh ra.
+# Để thấp hơn cửa sổ thật (128k của gpt-4o) rất nhiều, có chủ ý: phần dư là
+# chỗ cho output model sắp sinh ra, mà không request nào đếm trước được.
+# System prompt và tool schema thì KHÔNG còn nằm trong phần dư đó nữa — từ khi
+# session đọc `usage` của API, chúng được đo thật và nằm trong ngân sách này.
 MAX_TOKENS = 60_000
+
+# Trần cho MỘT tool result khi chiếu lên model. Một trang web thật đo được ~25k
+# ký tự, nên không có trần thì một lần `web_search(fetch_content=true)` đủ ăn
+# gần hết ngân sách trên.
+#
+# ~8k token, tức là một tool result được phép chiếm tối đa ~13% ngân sách. Đủ
+# rộng để một bài viết còn đọc được, đủ hẹp để vài lần gọi không nuốt cả phiên.
+# Trần nằm ở ĐÂY chứ không ở trong tool: tool không biết ngân sách là bao
+# nhiêu, cũng không biết có bao nhiêu tool khác đang tranh cùng chỗ đó.
+MAX_TOOL_RESULT_CHARS = 20_000
 
 # Provider nào tồn tại: khai báo ở đây, một chỗ duy nhất.
 # ReplayLLM không nằm trong dict này vì cờ của nó ĂN MỘT GIÁ TRỊ (`--replay
@@ -195,6 +205,7 @@ async def main() -> int:
     # Đặt sau mọi nhánh dựng session, kể cả `resume`: ngân sách là chính sách
     # lúc chạy, không phải thuộc tính của cái log trên đĩa.
     session.max_tokens = MAX_TOKENS
+    session.max_tool_result_chars = MAX_TOOL_RESULT_CHARS
 
     # Ghi agent vào log, một lần cho mỗi session. Không ghi thì `--resume` và
     # `--replay` sẽ dựng lại hội thoại cũ bằng persona HIỆN TẠI — replay vừa

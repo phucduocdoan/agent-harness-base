@@ -212,3 +212,11 @@ async def test_cancel_during_generate_needs_no_repair() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert [event["type"] for event in session.events] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_so_token_do_duoc_di_vao_log() -> None:
+    """Loop chỉ CHUYỂN con số, không diễn giải — nó không biết ngân sách là gì."""
+    _, _, session = await _run([AssistantMessage(text="ok", prompt_tokens=4_321)])
+    (assistant,) = [e for e in session.events if e["type"] == "assistant"]
+    assert assistant["prompt_tokens"] == 4_321
