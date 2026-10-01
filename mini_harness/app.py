@@ -12,6 +12,7 @@ những quyết định đó tập trung ở đây.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from mini_harness.llm.replay import ReplayLLM
 from mini_harness.profiles import DEFAULT_AGENT, PROFILES
 from mini_harness.tools.calculator import calculator_tool
 from mini_harness.tools.registry import Approver, ToolRegistry
+from mini_harness.tools.web_search import web_search_tool
 from mini_harness.tools.write_file import write_file_tool
 
 # Thư mục gốc của project (package nằm trong nó, .env nằm cạnh package).
@@ -71,15 +73,32 @@ def build_tools(
     nhau cho profile khác nhau, và đó là việc của file wiring này.
 
     Raises:
-        ValueError: profile gọi tên tool không tồn tại. Fail ngay lúc khởi
-            động, vì để nó im lặng thì agent chạy được nhưng thiếu tool, và
-            triệu chứng sẽ là "model tự dưng ngu đi" — loại bug tốn giờ nhất.
+        ValueError: profile gọi tên tool không tồn tại, hoặc gọi một tool cần
+            credential mà credential chưa có. Cả hai fail ngay lúc khởi động,
+            vì để nó im lặng thì agent chạy được nhưng thiếu tool, và triệu
+            chứng sẽ là "model tự dưng ngu đi" — loại bug tốn giờ nhất.
     """
     # SANDBOX truyền từ đây vì đây là chỗ duy nhất biết harness đang chạy ở đâu.
     available = {
         definition.name: definition
         for definition in (calculator_tool(), write_file_tool(SANDBOX))
     }
+    # Credential chỉ đòi khi profile THẬT SỰ cần: `tutor` không phải có
+    # TAVILY_API_KEY mới chạy được. Đây cũng là chỗ duy nhất đọc biến môi
+    # trường cho tool — `tools/web_search.py` nhận key qua tham số.
+    #
+    # Thiếu key thì DỪNG, không phải lặng lẽ bỏ tool đi. Research-Agents chọn
+    # hướng ngược lại (`is_available` -> `get_tools()` trả []), hợp lý với một
+    # app nhiều nguồn mà mất một nguồn vẫn chạy được. Ở đây thì không: một
+    # `research` agent không có web_search vẫn sẽ trả lời, bằng trí nhớ, và
+    # không ai nhìn ra được sự khác biệt cho tới khi kiểm chứng từng câu.
+    if "web_search" in allow:
+        api_key = os.environ.get("TAVILY_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "tool web_search cần TAVILY_API_KEY trong .env (lấy ở tavily.com)"
+            )
+        available["web_search"] = web_search_tool(api_key)
     unknown = sorted(set(allow) - set(available))
     if unknown:
         raise ValueError(f"profile gọi tool không có: {unknown}")
@@ -193,7 +212,13 @@ async def main() -> int:
         print(f"(log tạo bởi agent {recorded!r}, đang chạy {profile.name!r})")
 
     system = build_system_prompt(profile)
-    tools = build_tools(profile.tools, ask_terminal)
+    try:
+        tools = build_tools(profile.tools, ask_terminal)
+    except ValueError as error:
+        # Thiếu credential là lỗi của người chạy, không phải bug — traceback ở
+        # đây chỉ làm người đọc phải lội tìm dòng cuối.
+        print(error, file=sys.stderr)
+        return 1
     if question is None:
         # Chỉ chat mode cần echo: one-shot in `print_log` ở cuối là đủ.
         session.on_event = echo_tool_activity(display)

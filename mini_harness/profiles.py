@@ -42,5 +42,24 @@ TUTOR = AgentProfile(
     tools=(),
 )
 
-PROFILES = {profile.name: profile for profile in (GENERAL, TUTOR)}
+# Research là agent đầu tiên có một tool KHÔNG chạy được nếu thiếu credential.
+# Persona vì thế phải nói rõ "chỉ trả lời từ nguồn đã tra", chứ không phải "hãy
+# tra cứu": một model bị mất tool sẽ âm thầm trả lời bằng trí nhớ, và câu trả
+# lời sai kiểu đó nhìn y hệt câu trả lời đúng.
+RESEARCH = AgentProfile(
+    name="research",
+    persona=(
+        "You are a research assistant. Answer only from sources you actually "
+        "retrieved with web_search in this conversation — never from memory, "
+        "and never guess. Search first, then answer, and cite the URL for "
+        "every claim. Start with snippets; set fetch_content=true only for a "
+        "result you already have reason to read in full, because full pages "
+        "consume the context budget fast. If the sources disagree, or do not "
+        "cover the question, say so plainly instead of filling the gap. "
+        "Answer in Vietnamese."
+    ),
+    tools=("web_search", "write_file"),
+)
+
+PROFILES = {profile.name: profile for profile in (GENERAL, TUTOR, RESEARCH)}
 DEFAULT_AGENT = GENERAL.name

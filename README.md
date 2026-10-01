@@ -21,10 +21,10 @@ mini_harness/
   core/    types.py  loop.py  session.py     # không import implementation nào
            prompt.py  agent.py               # ráp system prompt; agent = dữ liệu
   llm/     stream.py  deepseek.py  azure.py  # chỗ duy nhất biết wire format
-  tools/   registry.py  calculator.py  write_file.py
+  tools/   registry.py  calculator.py  write_file.py  web_search.py
   cli/     terminal.py  chat.py              # chỗ duy nhất in ra màn hình
   context.py                                 # giờ, workspace — chạm thế giới thật
-  profiles.py                                # general, tutor: persona + tool set
+  profiles.py                                # general, tutor, research
   app.py                                     # chỗ duy nhất biết tất cả những thứ trên
 ```
 
@@ -46,12 +46,15 @@ python3 -m mini_harness --azure "100 * 1.1 = ?"     # một câu rồi thoát
 python3 -m mini_harness --azure --session run.jsonl # ghi/resume event log
 python3 -m mini_harness --replay run.jsonl          # phát lại log cũ, không cần API key
 python3 -m mini_harness --azure --agent tutor       # đổi persona + tập tool
+python3 -m mini_harness --azure --agent research    # cần TAVILY_API_KEY
 python3 -m pytest -q
 ```
 
 Credential đọc từ `.env` ở gốc repo (không commit):
 `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_API_VERSION`,
 `AZURE_OPENAI_DEPLOYMENT` — hoặc `DEEPSEEK_API_KEY` cho `--deepseek`.
+`TAVILY_API_KEY` chỉ cần cho agent nào cầm `web_search`; thiếu thì harness
+dừng ngay lúc khởi động chứ không lặng lẽ bỏ tool đi.
 
 Trong chat mode: `Ctrl-C` huỷ **turn** đang chạy và giữ session; `Ctrl-C` ở
 prompt trống, `Ctrl-D` hoặc `/quit` để thoát.
