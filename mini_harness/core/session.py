@@ -182,6 +182,17 @@ class Session:
                     "tool_call_id": event["call_id"],
                     "content": event["content"],
                 })
+            elif kind == "agent":
+                # Event METADATA: ghi vào log nhưng KHÔNG gửi cho model. Nó trả
+                # lời câu "log này chạy bằng persona nào" — câu mà resume và
+                # replay cần, còn model thì không (persona đã nằm sẵn trong
+                # system prompt rồi, chiếu thêm lần nữa là nói hai lần).
+                #
+                # Đây là event đầu tiên thuộc nhóm "ghi mà không chiếu". Harness
+                # thật có cả một họ như vậy: turn/start, step/start,
+                # compaction/*. Nhóm này là lý do `to_messages()` phải là phép
+                # CHIẾU có chọn lọc chứ không phải phép đổi dạng 1-1.
+                continue
             else:
                 raise ValueError(f"event type không biết: {kind!r}")
         return messages

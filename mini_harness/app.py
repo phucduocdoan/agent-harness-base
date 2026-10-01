@@ -20,11 +20,15 @@ from dotenv import load_dotenv
 
 from mini_harness.cli.chat import chat, echo_tool_activity, print_log
 from mini_harness.cli.terminal import TerminalStream, ask_terminal
+from mini_harness.context import time_context, workspace_context
+from mini_harness.core.agent import AgentProfile
 from mini_harness.core.loop import run_turn
+from mini_harness.core.prompt import assemble
 from mini_harness.core.session import Session
 from mini_harness.llm.azure import AzureLLM
 from mini_harness.llm.deepseek import DeepSeekLLM
 from mini_harness.llm.replay import ReplayLLM
+from mini_harness.profiles import DEFAULT_AGENT, PROFILES
 from mini_harness.tools.calculator import calculator_tool
 from mini_harness.tools.registry import Approver, ToolRegistry
 from mini_harness.tools.write_file import write_file_tool
@@ -42,11 +46,6 @@ SANDBOX = ROOT / "sandbox"
 # output model sắp sinh ra.
 MAX_TOKENS = 60_000
 
-SYSTEM = (
-    "You are a helpful assistant. Use the calculator tool for any arithmetic "
-    "instead of computing it yourself. Answer in Vietnamese."
-)
-
 # Provider nào tồn tại: khai báo ở đây, một chỗ duy nhất.
 # ReplayLLM không nằm trong dict này vì cờ của nó ĂN MỘT GIÁ TRỊ (`--replay
 # <log>`), còn dict này ánh xạ cờ-không-giá-trị -> class dựng bằng `on_text`.
@@ -57,18 +56,54 @@ PROVIDERS = {
 }
 
 
-def build_tools(approver: Approver | None = None) -> ToolRegistry:
-    """Đăng ký tool. Liệt kê tay, KHÔNG auto-discover.
+def build_tools(
+    allow: tuple[str, ...], approver: Approver | None = None
+) -> ToolRegistry:
+    """Đăng ký tool mà profile cho phép. Liệt kê tay, KHÔNG auto-discover.
 
     Quét thư mục để tự nạp tool nghe tiện hơn nhưng phá đúng cái tính chất
     đang giữ: đọc một file là biết harness có những gì. Thêm nữa, tool nạp
     ngầm mà lỗi thì lặng lẽ biến mất; dòng `register` ở đây thì fail rõ ràng.
+
+    Lọc ở đây chứ không lọc trong `ToolRegistry`: registry vốn ĐÃ là "tập tool
+    visible của một agent" (xem docstring của nó). Một agent một registry thì
+    không cần khái niệm visibility nào mới — cái cần chỉ là dựng registry khác
+    nhau cho profile khác nhau, và đó là việc của file wiring này.
+
+    Raises:
+        ValueError: profile gọi tên tool không tồn tại. Fail ngay lúc khởi
+            động, vì để nó im lặng thì agent chạy được nhưng thiếu tool, và
+            triệu chứng sẽ là "model tự dưng ngu đi" — loại bug tốn giờ nhất.
     """
-    registry = ToolRegistry(approver=approver)
-    registry.register(calculator_tool())
     # SANDBOX truyền từ đây vì đây là chỗ duy nhất biết harness đang chạy ở đâu.
-    registry.register(write_file_tool(SANDBOX))
+    available = {
+        definition.name: definition
+        for definition in (calculator_tool(), write_file_tool(SANDBOX))
+    }
+    unknown = sorted(set(allow) - set(available))
+    if unknown:
+        raise ValueError(f"profile gọi tool không có: {unknown}")
+    registry = ToolRegistry(approver=approver)
+    for name in allow:
+        registry.register(available[name])
     return registry
+
+
+def build_system_prompt(profile: AgentProfile) -> str:
+    """Ráp system prompt cho một profile. Gọi MỘT lần cho cả phiên.
+
+    Một lần, không phải mỗi step: system prompt là prefix của mọi request
+    trong phiên, và prompt cache chỉ ăn khi prefix giống hệt nhau. Ráp lại mỗi
+    step (kèm đồng hồ chạy) là tự tay làm hỏng cache của chính mình.
+
+    Mô tả workspace chỉ gửi cho agent thật sự ghi được vào đó. Kể cho một agent
+    không có `write_file` về thư mục nó không đụng tới được là mời nó thử.
+    """
+    return assemble(
+        profile.persona,
+        time_context(),
+        workspace_context(SANDBOX) if "write_file" in profile.tools else None,
+    )
 
 
 async def main() -> int:
@@ -94,6 +129,20 @@ async def main() -> int:
         if not replay_path.exists():
             print(f"không có log để phát lại: {replay_path}", file=sys.stderr)
             return 1
+        del argv[index : index + 2]
+
+    profile = PROFILES[DEFAULT_AGENT]
+    if "--agent" in argv:
+        index = argv.index("--agent")
+        if index + 1 >= len(argv):
+            print(f"--agent cần một tên: {' | '.join(PROFILES)}", file=sys.stderr)
+            return 1
+        name = argv[index + 1]
+        if name not in PROFILES:
+            print(f"không có agent {name!r}; có: {' | '.join(PROFILES)}",
+                  file=sys.stderr)
+            return 1
+        profile = PROFILES[name]
         del argv[index : index + 2]
 
     flags = [arg for arg in argv if arg in PROVIDERS]
@@ -128,21 +177,37 @@ async def main() -> int:
     # lúc chạy, không phải thuộc tính của cái log trên đĩa.
     session.max_tokens = MAX_TOKENS
 
-    tools = build_tools(ask_terminal)
+    # Ghi agent vào log, một lần cho mỗi session. Không ghi thì `--resume` và
+    # `--replay` sẽ dựng lại hội thoại cũ bằng persona HIỆN TẠI — replay vừa
+    # ghim model lại để còn đúng một biến, mà prompt vẫn trôi thì vẫn hai.
+    recorded = next(
+        (event["name"] for event in session.events if event["type"] == "agent"), None
+    )
+    if recorded is None:
+        session.append({"type": "agent", "name": profile.name})
+    elif recorded != profile.name:
+        # Harness thật TỪ CHỐI hẳn ở đây ('agent-preset/locked': composition
+        # đóng băng khi hội thoại đã bắt đầu). Ở repo học thì cảnh báo hợp hơn:
+        # chạy lại một log cũ bằng persona khác chính là một thí nghiệm đáng
+        # làm. Nhưng phải nói ra, vì im lặng thì kết quả so sánh sẽ vô nghĩa.
+        print(f"(log tạo bởi agent {recorded!r}, đang chạy {profile.name!r})")
+
+    system = build_system_prompt(profile)
+    tools = build_tools(profile.tools, ask_terminal)
     if question is None:
         # Chỉ chat mode cần echo: one-shot in `print_log` ở cuối là đủ.
         session.on_event = echo_tool_activity(display)
         print("chat mode — Ctrl-C huỷ turn đang chạy; Ctrl-C ở prompt trống, "
               "Ctrl-D hoặc /quit để thoát")
         return await chat(
-            llm=llm, tools=tools, session=session, system=SYSTEM, display=display,
+            llm=llm, tools=tools, session=session, system=system, display=display,
         )
 
     print(f"user: {question}")
     try:
         await run_turn(
             llm=llm, tools=tools, session=session,
-            system=SYSTEM, user_input=question,
+            system=system, user_input=question,
         )
     except asyncio.CancelledError:
         # Ctrl-C: asyncio.run huỷ task này, nên nó tới đây dưới dạng

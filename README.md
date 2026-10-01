@@ -19,9 +19,12 @@ muốn tra cứu. Comment trong code có dòng "Đối chiếu: …" trỏ tới
 ```
 mini_harness/
   core/    types.py  loop.py  session.py     # không import implementation nào
+           prompt.py  agent.py               # ráp system prompt; agent = dữ liệu
   llm/     stream.py  deepseek.py  azure.py  # chỗ duy nhất biết wire format
   tools/   registry.py  calculator.py  write_file.py
   cli/     terminal.py  chat.py              # chỗ duy nhất in ra màn hình
+  context.py                                 # giờ, workspace — chạm thế giới thật
+  profiles.py                                # general, tutor: persona + tool set
   app.py                                     # chỗ duy nhất biết tất cả những thứ trên
 ```
 
@@ -31,6 +34,10 @@ là **event log append-only**; message list gửi cho model là thứ *phái sin
 (`to_messages()`) — đó là cái làm resume, replay và **compaction** khả thi: cắt
 ngữ cảnh cho vừa cửa sổ model là cắt ở phép chiếu, log vẫn nguyên vẹn.
 
+Một **loại agent** (`general`, `tutor`, …) là *dữ liệu*, không phải class con:
+persona + tập tool. Thêm agent mới không sửa dòng nào trong `core/loop.py` hay
+`tools/registry.py` — đó là phép thử của các seam phía trên.
+
 ### Chạy
 
 ```bash
@@ -38,6 +45,7 @@ python3 -m mini_harness --azure                     # chat mode
 python3 -m mini_harness --azure "100 * 1.1 = ?"     # một câu rồi thoát
 python3 -m mini_harness --azure --session run.jsonl # ghi/resume event log
 python3 -m mini_harness --replay run.jsonl          # phát lại log cũ, không cần API key
+python3 -m mini_harness --azure --agent tutor       # đổi persona + tập tool
 python3 -m pytest -q
 ```
 

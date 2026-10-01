@@ -47,7 +47,7 @@ def print_log(session: Session) -> None:
     print("\n--- session.events (log thô) ---")
     for index, event in enumerate(session.events):
         mark = " [ERROR]" if event.get("is_error") else ""
-        detail = event.get("content") or ""
+        detail = event.get("content") or event.get("name") or ""
         if event.get("tool_calls"):
             detail = f"{detail} -> " + ", ".join(
                 f"{call['name']}({call['arguments']})" for call in event["tool_calls"]
