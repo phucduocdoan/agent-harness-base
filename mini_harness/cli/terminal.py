@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+import selectors
 import sys
 from typing import Any
 
@@ -52,6 +53,25 @@ _STDIN: asyncio.StreamReader | None = None
 _STDIN_FLAGS: int | None = None
 # fd SỐ NGUYÊN, không phải object `sys.stdin`: xem `restore_stdin`.
 _STDIN_FD: int | None = None
+# None = chưa xét. False = stdin không vào được epoll, phải đọc thẳng.
+_STDIN_POLL_DUOC: bool | None = None
+
+
+def _poll_duoc(fd: int) -> bool:
+    """fd có đăng ký được vào epoll không.
+
+    Thử đúng việc asyncio sắp làm, thay vì đoán qua `stat`: /dev/null là
+    character device y hệt một TTY, nhưng epoll nhận TTY và từ chối /dev/null —
+    phân loại theo kiểu file sẽ sai.
+    """
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(fd, selectors.EVENT_READ)
+    except (OSError, ValueError):
+        return False
+    finally:
+        selector.close()
+    return True
 
 
 def restore_stdin() -> None:
@@ -83,10 +103,27 @@ async def read_line() -> str:
     thread vẫn nằm trong read(2), mà `asyncio.run` join executor lúc shutdown
     -> Ctrl-C ở prompt approval làm process treo vĩnh viễn. Nối stdin vào loop
     thì huỷ nhả được ngay.
+
+    Nhưng `connect_read_pipe` chỉ chạy với fd mà epoll nhận. stdin là /dev/null
+    hay file thường thì nó hỏng, và hỏng theo kiểu tệ nhất: lỗi ném trong
+    CALLBACK của loop nên bị nuốt mất, `readline()` không bao giờ về, process
+    treo vĩnh viễn và không in ra lý do nào. Đo thật: `--replay log < /dev/null`
+    treo cho tới khi bị kill.
+
+    Với hai loại fd đó thì đọc thẳng là đủ: read(2) trên file thường và
+    /dev/null không bao giờ block, mà cái bẫy ở trên chỉ tồn tại khi việc đọc
+    có thể treo.
     """
-    global _STDIN, _STDIN_FLAGS, _STDIN_FD
-    if _STDIN is None:
+    global _STDIN, _STDIN_FLAGS, _STDIN_FD, _STDIN_POLL_DUOC
+    if _STDIN_POLL_DUOC is None:
         _STDIN_FD = sys.stdin.fileno()
+        _STDIN_POLL_DUOC = _poll_duoc(_STDIN_FD)
+    if not _STDIN_POLL_DUOC:
+        line = sys.stdin.readline()
+        if not line:
+            raise EOFError("stdin đã đóng")
+        return line
+    if _STDIN is None:
         _STDIN_FLAGS = fcntl.fcntl(_STDIN_FD, fcntl.F_GETFL)
         _STDIN = asyncio.StreamReader()
         await asyncio.get_running_loop().connect_read_pipe(
