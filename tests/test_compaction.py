@@ -224,3 +224,34 @@ def test_hieu_chinh_duoc_phep_am() -> None:
                     "prompt_tokens": 4_147})
     # Neo đúng: ước lượng của chính tập event vừa đo phải khớp số API báo.
     assert session._estimate(session._for_model(events)) == 4_147
+
+
+def test_resume_hoc_lai_phep_neo_tu_log(tmp_path) -> None:
+    """Số API đã đo nằm NGAY TRONG LOG — resume mà bỏ qua là tự làm mình mù.
+
+    Đo thật trên một log `research`: không chạy lại phép neo thì session ước
+    lượng 11167 token cho một request mà API đã báo 8954, thừa 25%, và hệ quả
+    là bỏ turn cũ sớm hơn cần thiết ngay ở request đầu sau resume.
+
+    Tool result ở đây CỐ Ý vượt trần: phép neo phải chiếu log qua đúng chính
+    sách cắt đang chạy, nên ngân sách phải tới nơi TRƯỚC khi neo. Dựng session
+    rồi mới gán ngân sách thì neo chạy trên bản không cắt — đo thật ra -27194,
+    và ước lượng request kế tiếp thành số âm.
+    """
+    log_path = tmp_path / "cu.jsonl"
+    goc = Session(log_path=log_path, max_tokens=60_000, max_tool_result_chars=20_000)
+    for event in _tool_turn("a", "x" * 50_000):
+        goc.append(event)
+    goc.append({"type": "assistant", "content": "", "tool_calls": [],
+                "prompt_tokens": 4_147})
+
+    tiep = Session.resume(log_path, max_tokens=60_000, max_tool_result_chars=20_000)
+    assert tiep._calibration == goc._calibration
+    assert tiep._estimate(tiep._for_model(tiep.events[:-1])) == 4_147
+
+
+def test_log_khong_co_so_do_nao_thi_resume_khong_neo() -> None:
+    """Log cũ, hoặc log của `--replay`: không có gì để neo, và đó là hợp lệ."""
+    session = Session(events=[{"type": "user", "content": "chào"}])
+    session._recalibrate()
+    assert session._calibration == 0

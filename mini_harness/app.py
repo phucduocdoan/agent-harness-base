@@ -194,18 +194,19 @@ async def main() -> int:
         print(f"không dựng được provider: {error}", file=sys.stderr)
         return 1
 
+    # Ngân sách truyền lúc DỰNG, cho cả ba nhánh: `resume` phải biết chính
+    # sách cắt ngay lúc nó học lại phép neo từ log. Gán sau là để session tồn
+    # tại một khoảnh khắc ở trạng thái nửa cấu hình, và `resume` rơi đúng vào
+    # khoảnh khắc đó. Ngân sách vẫn là chính sách lúc chạy, không phải thuộc
+    # tính của cái log trên đĩa — log không chứa hai con số này.
+    budget = {"max_tokens": MAX_TOKENS, "max_tool_result_chars": MAX_TOOL_RESULT_CHARS}
     if session_path is None:
-        session = Session()
+        session = Session(**budget)
     elif session_path.exists():
-        session = Session.resume(session_path)
+        session = Session.resume(session_path, **budget)
         print(f"(resume {len(session.events)} event từ {session_path})")
     else:
-        session = Session(log_path=session_path)
-
-    # Đặt sau mọi nhánh dựng session, kể cả `resume`: ngân sách là chính sách
-    # lúc chạy, không phải thuộc tính của cái log trên đĩa.
-    session.max_tokens = MAX_TOKENS
-    session.max_tool_result_chars = MAX_TOOL_RESULT_CHARS
+        session = Session(log_path=session_path, **budget)
 
     # Ghi agent vào log, một lần cho mỗi session. Không ghi thì `--resume` và
     # `--replay` sẽ dựng lại hội thoại cũ bằng persona HIỆN TẠI — replay vừa

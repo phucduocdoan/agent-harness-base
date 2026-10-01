@@ -62,11 +62,24 @@ class Session:
         if self.on_event is not None:
             self.on_event(event)
         if event["type"] == "assistant" and event.get("prompt_tokens"):
-            self._calibrate(event["prompt_tokens"])
+            # Cái đã gửi đi ở step này là log TRỪ chính event vừa append.
+            self._calibrate(event["prompt_tokens"], self.events[:-1])
 
     @classmethod
-    def resume(cls, log_path: Path) -> Session:
+    def resume(
+        cls,
+        log_path: Path,
+        *,
+        max_tokens: int | None = None,
+        max_tool_result_chars: int | None = None,
+    ) -> Session:
         """Đọc lại log và trả về session ghi tiếp vào chính file đó.
+
+        Ngân sách nhận NGAY ở đây chứ không gán sau, vì `_recalibrate` phải
+        chiếu log qua đúng chính sách đang chạy. Dựng xong mới gán thì phép neo
+        đã chạy trên một phép chiếu không cắt gì — đo thật trên một log có
+        tool result 81k ký tự: hiệu chỉnh ra -27194, và ước lượng request kế
+        tiếp ra số ÂM. Một session nửa cấu hình là một session sai.
 
         Log có thể kết thúc giữa turn: một `assistant` có tool_calls mà thiếu
         `tool_result` (bị kill, crash, cancel). Gửi nguyên trạng đó lên API là
@@ -83,7 +96,13 @@ class Session:
             for line in log_path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        session = cls(events=events, log_path=log_path)
+        session = cls(
+            events=events,
+            log_path=log_path,
+            max_tokens=max_tokens,
+            max_tool_result_chars=max_tool_result_chars,
+        )
+        session._recalibrate()
         session.abort_pending_tool_calls()
         return session
 
@@ -118,15 +137,34 @@ class Session:
 
     # ------------------------------------------------------- ngân sách token
 
-    def _calibrate(self, prompt_tokens: int) -> None:
+    def _recalibrate(self) -> None:
+        """Chạy lại phép neo trên một log vừa đọc từ đĩa.
+
+        `append()` là chỗ phép neo tiến từng bước, nhưng `resume` dựng thẳng
+        session từ list nên không đi qua đó. Không chạy lại thì con số API đã
+        đo nằm NGAY TRONG LOG bị bỏ phí — đo thật trên một log có sẵn: session
+        ước lượng 9662 token cho một request mà API đã báo 6697, thừa 44%, và
+        hệ quả là bỏ turn cũ sớm hơn mức cần thiết.
+
+        Cuộn tiến từ đầu chứ không nhảy thẳng tới event cuối, vì `_for_model`
+        của mỗi bước phụ thuộc phép neo của bước trước (qua `_within_budget`).
+        Cuộn tiến tái hiện đúng thứ tự đã xảy ra lúc chạy thật. Đối chiếu
+        llm/token-meter: "advances one isolated fold per session from the
+        durable event log".
+        """
+        self._calibration = 0
+        for index, event in enumerate(self.events):
+            if event["type"] == "assistant" and event.get("prompt_tokens"):
+                self._calibrate(event["prompt_tokens"], self.events[:index])
+
+    def _calibrate(self, prompt_tokens: int, sent: list[dict[str, Any]]) -> None:
         """Neo bộ đoán vào số API thật, bằng một phép trừ.
 
             hiệu chỉnh = số API báo  -  bộ đoán tự tính cho CÙNG tập event đó
 
-        `self.events[:-1]` chính là cái đã được chiếu đi gửi ở step này —
-        event assistant vừa append là câu trả lời cho nó. Tính lại ở đây thay
-        vì nhờ `to_messages()` ghi lại: phép chiếu giữ nguyên tính thuần, và
-        không ai phải nhớ thứ tự gọi giữa hai hàm.
+        `sent` là log tại thời điểm request đó đi — caller biết, session thì
+        không. Tính lại ở đây thay vì nhờ `to_messages()` ghi lại: phép chiếu
+        giữ nguyên tính thuần, và không ai phải nhớ thứ tự gọi giữa hai hàm.
 
         Hệ quả: `_estimate` của đúng tập event vừa đo sẽ ra lại đúng
         `prompt_tokens`. Mọi sai số đã bị hấp thụ, và chỉ phần event MỚI phát
@@ -145,7 +183,7 @@ class Session:
         một tool result 15.8k ký tự vào log. Chặn ở 0 là vứt bỏ phép hiệu
         chỉnh đúng lúc nó cần nhất.
         """
-        self._calibration = prompt_tokens - self._guess(self._for_model(self.events[:-1]))
+        self._calibration = prompt_tokens - self._guess(self._for_model(sent))
 
     # Ước lượng THÔ, cố ý nghiêng về phía đoán thừa: chừng nào chưa có số đo
     # nào thì đoán thiếu nghĩa là tưởng còn chỗ trong khi đã tràn. Đo bằng
