@@ -211,7 +211,21 @@ async def main() -> int:
     # tại một khoảnh khắc ở trạng thái nửa cấu hình, và `resume` rơi đúng vào
     # khoảnh khắc đó. Ngân sách vẫn là chính sách lúc chạy, không phải thuộc
     # tính của cái log trên đĩa — log không chứa hai con số này.
-    budget = {"max_tokens": MAX_TOKENS, "max_tool_result_chars": MAX_TOOL_RESULT_CHARS}
+    #
+    # `--replay` thì KHÔNG có ngân sách, và đó không phải để né tránh: ngân
+    # sách là thuộc tính của provider đang chạy, mà ReplayLLM không có cửa sổ
+    # ngữ cảnh nào — "cửa sổ" của nó chính là cái log. Mục đích của replay là
+    # tái hiện log cho đúng, nên mọi phép cắt phải tắt.
+    #
+    # Cụ thể hơn: lần gọi model để tóm tắt CŨNG là một `llm.generate`, nhưng
+    # kết quả của nó vào log dưới dạng event `compaction`, không phải
+    # `assistant`. Nên nếu nén nổ lúc replay, nó sẽ ngốn mất một assistant
+    # event của step kế tiếp và mọi thứ sau đó lệch pha.
+    budget = (
+        {"max_tokens": None, "max_tool_result_chars": None}
+        if replay_path is not None
+        else {"max_tokens": MAX_TOKENS, "max_tool_result_chars": MAX_TOOL_RESULT_CHARS}
+    )
     if session_path is None:
         session = Session(**budget)
     elif session_path.exists():

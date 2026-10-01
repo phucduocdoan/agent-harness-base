@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from mini_harness.core.types import CompactionPlan
+
 # Result giả ghi cho tool_call chưa kịp chạy. Text lấy đúng harness thật
 # (tool-calls.ts:253) vì nó cũng là model-facing text.
 ABORTED_BEFORE_DISPATCH = "Error: tool call aborted before dispatch"
@@ -212,14 +214,49 @@ class Session:
     def _for_model(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Chuỗi chính sách áp lên log trước khi chiếu. KHÔNG sửa `self.events`.
 
-        Thứ tự bắt buộc là cắt-ruột TRƯỚC, bỏ-turn SAU. Ngược lại thì
-        `_estimate` đếm tool result ở cỡ đầy đủ rồi vứt đi những turn mà sau
-        khi cắt vốn vẫn vừa chỗ — mất dữ liệu một cách oan uổng. Đối chiếu
+        Ba bước, xếp theo mức độ mất mát TĂNG DẦN — đó là toàn bộ lý do của
+        thứ tự này:
+
+          1. `_compacted`  — thay khúc đầu bằng bản tóm tắt model đã viết.
+             Mất chi tiết, nhưng giữ lại ý; và tool result trong vùng đó vẫn
+             đọc lại được qua `call_id`.
+          2. `_pruned`     — cắt ruột tool result quá khổ, để lại locator.
+             Gần như không mất gì: `read_spill` lấy lại được nguyên văn.
+          3. `_within_budget` — bỏ TRỌN turn cũ. Mất hẳn, không có đường về.
+
+        Nên bước 3 là lưới an toàn chứ không phải cơ chế chính: nó chỉ chạy
+        khi hai bước trên đã làm hết sức mà vẫn chưa vừa. Đảo thứ tự là bỏ đi
+        những turn mà sau khi nén/cắt vốn vẫn vừa chỗ. Đối chiếu
         compaction-tool-result-pruner: "Trimming makes no model call and can
         clear token pressure on its own, so compaction may skip the summary
         entirely."
         """
-        return self._within_budget(self._pruned(events))
+        return self._within_budget(self._pruned(self._compacted(events)))
+
+    def _compacted(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Thay khúc đầu bằng bản tóm tắt, nếu log có event `compaction`.
+
+        Chỉ đọc event compaction CUỐI CÙNG. Nén lần hai không sửa gì của lần
+        một — nó append một event mới với `covers` lớn hơn, và bản cũ rơi vào
+        đúng vùng mà bản mới đứng thay. Không có mâu thuẫn để hoà giải: bản
+        mới được model viết ra TỪ một phép chiếu đã chứa bản cũ, nên nội dung
+        cũ đã nằm trong đó rồi. Đối chiếu compaction-basic: "If the
+        conversation already contains a <compacted-summary> block, it is a
+        PRIOR checkpoint... merge newer information into a single consolidated
+        summary."
+
+        Nhận `events` qua tham số chứ không đọc `self.events`: `_calibrate`
+        chiếu lại từng tiền tố của log để cuộn phép neo, và mỗi tiền tố có thể
+        đang ở một trạng thái nén khác nhau.
+        """
+        marker = next(
+            (event for event in reversed(events) if event["type"] == "compaction"), None
+        )
+        if marker is None:
+            return events
+        return [_summary_event(marker["content"])] + [
+            event for event in events[marker["covers"]:] if event["type"] != "compaction"
+        ]
 
     def _pruned(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Cắt ruột những tool result quá khổ."""
@@ -250,6 +287,108 @@ class Session:
         # khác (cắt nhỏ chính câu hỏi), không phải của compaction.
         return kept
 
+    # Nén khi phép chiếu (đã nén + đã cắt ruột, CHƯA bỏ turn) vượt ngần này
+    # phần ngân sách. Phải nổ TRƯỚC lúc tràn, vì hai lý do: còn chỗ cho chính
+    # request tóm tắt chạy, và vùng đem đi tóm tắt vẫn còn là tiền tố nguyên vẹn
+    # của request vừa gửi — tức prefix cache còn dùng lại được.
+    _COMPACTION_THRESHOLD = 0.8
+    # Phần đuôi giữ NGUYÊN VĂN, tính theo ngân sách. Tóm tắt là mất chi tiết,
+    # mà chi tiết của mấy turn gần nhất là thứ model đang thật sự làm việc trên.
+    _COMPACTION_RETAIN = 0.16
+
+    def plan_compaction(self) -> CompactionPlan | None:
+        """Có cần nén không, và nếu có thì nén tới đâu — trả `None` nếu chưa cần.
+
+        Session trả lời câu này chứ không phải `core/compaction.py`, vì trả lời
+        được nó cần đo: ngân sách, phép chiếu, phép neo token. Còn gọi model thì
+        Session không làm. Hai việc, hai file.
+
+        Ngưỡng đo trên `_pruned(_compacted(...))` — tức là mọi thứ TRỪ phép bỏ
+        turn. Đo sau khi bỏ turn thì con số luôn nằm dưới ngân sách và compaction
+        không bao giờ nổ; đo trước khi cắt ruột thì nó nổ cả những lần mà cắt
+        ruột (miễn phí, không gọi model) vốn đã đủ. Đối chiếu
+        compaction-tool-result-pruner: "Trimming makes no model call and can
+        clear token pressure on its own".
+        """
+        if self.max_tokens is None:
+            return None
+        if self._estimate(self._pruned(self._compacted(self.events))) <= (
+            self.max_tokens * self._COMPACTION_THRESHOLD
+        ):
+            return None
+
+        # Chỉ xét phần log CHƯA bị nén. Nén lại cái đã nén là trả tiền model
+        # hai lần cho cùng một đoạn text.
+        start = self._compaction_start()
+        turns = _split_turns(self.events[start:])
+        retain = self.max_tokens * self._COMPACTION_RETAIN
+        kept = 0
+        total = 0
+        # Đi từ turn MỚI nhất lùi lại: cái gần hiện tại là cái phải giữ nguyên văn.
+        for turn in reversed(turns):
+            cost = self._guess(self._pruned(turn))
+            # `kept` ở điều kiện đầu: luôn giữ ít nhất một turn, kể cả khi một
+            # mình nó đã vượt `retain`. Nén luôn turn đang chạy là nén mất chính
+            # câu hỏi model đang trả lời.
+            if kept and total + cost > retain:
+                break
+            kept += len(turn)
+            total += cost
+
+        covers = len(self.events) - kept
+        if covers <= start:
+            # Không có turn nào mới để nén. Xảy ra khi một turn duy nhất đã
+            # chiếm hết ngân sách — compaction không chẻ được một turn, và
+            # không giả vờ là chẻ được. Đối chiếu compaction/: "balanced summary
+            # compaction cannot split one indivisible unit".
+            return None
+
+        # Vùng đem tóm tắt chiếu qua _compacted + _pruned nhưng KHÔNG qua
+        # _within_budget: nguồn của bản tóm tắt là LOG, không phải request vừa
+        # gửi. Khi bỏ-turn đã phải nổ, bản tóm tắt nhờ vậy còn kéo lại được
+        # những turn model vừa mất.
+        #
+        # Và vì `_render` ánh xạ từng event độc lập, danh sách này là TIỀN TỐ
+        # BYTE-FOR-BYTE của `to_messages()` — CHỪNG NÀO `_within_budget` chưa
+        # bỏ gì. Ngưỡng 0.8 làm cho đó là trường hợp thường, không phải là bảo
+        # đảm: một turn đủ lớn vẫn nhảy thẳng từ dưới ngưỡng lên quá ngân sách
+        # trong một bước. Mất tiền tố thì chỉ mất prefix cache cho đúng lần gọi
+        # đó, không sai kết quả. Đối chiếu compaction-basic: "the replayed
+        # system prompt, tools, and shadowed-region messages match the
+        # conversation's last routed request byte-for-byte".
+        region = self._render(self._pruned(self._compacted(self.events[:covers])))
+        return CompactionPlan(covers=covers, messages=region)
+
+    def apply_compaction(self, plan: CompactionPlan, summary: str) -> bool:
+        """Ghi bản tóm tắt vào log. Trả `False` nếu từ chối nó.
+
+        Event mang text THÔ, chưa đóng khung. Khung `<compacted-summary>` và
+        lời dẫn checkpoint được dựng ở phép chiếu (`_summary_event`), không
+        nằm trong log. Cùng một luật đã áp cho `is_error`: log giữ sự thật,
+        wire format là thứ phái sinh. Upstream đạt cùng kết quả bằng hai event
+        (`compaction/summary` thô + một `user/message` đã đóng khung); ở đây
+        ranh giới log/projection đã làm sẵn việc đó nên một event là đủ.
+
+        Từ chối bản tóm tắt KHÔNG nhỏ hơn vùng nó thay thế — nếu không, "nén"
+        có thể làm phình ngữ cảnh ra, và lần sau lại nổ ngưỡng ngay. Đối chiếu
+        compaction/: "rejects a summary that does not shrink its source".
+        """
+        if not summary.strip():
+            return False
+        truoc = self._guess(self._pruned(self._compacted(self.events[: plan.covers])))
+        if self._guess([_summary_event(summary)]) >= truoc:
+            return False
+        self.append({"type": "compaction", "content": summary, "covers": plan.covers})
+        return True
+
+    def _compaction_start(self) -> int:
+        """Log đã được nén tới event thứ mấy. 0 nếu chưa nén lần nào."""
+        return next(
+            (event["covers"] for event in reversed(self.events)
+             if event["type"] == "compaction"),
+            0,
+        )
+
     def to_messages(self) -> list[dict[str, Any]]:
         """Chiếu log thành message list đúng wire format của OpenAI/DeepSeek.
 
@@ -261,8 +400,20 @@ class Session:
         ĐÂY — log vẫn giữ nguyên bản đầy đủ. Đó chính là lý do tách log khỏi
         projection ngay từ đầu: cắt ngữ cảnh mà không mất dữ liệu.
         """
+        return self._render(self._for_model(self.events))
+
+    def _render(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Đổi dạng event -> message, KHÔNG áp chính sách nào.
+
+        Tách khỏi `to_messages` vì `plan_compaction` cần chiếu một tiền tố của
+        log qua một chuỗi chính sách KHÁC (không bỏ turn). Và vì hàm này ánh xạ
+        từng event một cách độc lập — không có trạng thái vắt qua giữa các
+        event — nên "chiếu rồi lấy tiền tố" và "lấy tiền tố rồi chiếu" ra cùng
+        một thứ. Đó chính là tính chất `plan_compaction` dựa vào để giữ prefix
+        cache còn ấm.
+        """
         messages: list[dict[str, Any]] = []
-        for event in self._for_model(self.events):
+        for event in events:
             kind = event["type"]
             if kind == "user":
                 messages.append({"role": "user", "content": event["content"]})
@@ -288,20 +439,65 @@ class Session:
                     "tool_call_id": event["call_id"],
                     "content": event["content"],
                 })
-            elif kind == "agent":
+            elif kind in ("agent", "compaction_failed"):
                 # Event METADATA: ghi vào log nhưng KHÔNG gửi cho model. Nó trả
                 # lời câu "log này chạy bằng persona nào" — câu mà resume và
                 # replay cần, còn model thì không (persona đã nằm sẵn trong
                 # system prompt rồi, chiếu thêm lần nữa là nói hai lần).
                 #
-                # Đây là event đầu tiên thuộc nhóm "ghi mà không chiếu". Harness
-                # thật có cả một họ như vậy: turn/start, step/start,
+                # Nhóm "ghi mà không chiếu". `compaction_failed` cũng vào đây:
+                # một lần nén hỏng là chuyện nội bộ của harness, kể cho model
+                # nghe là mời nó bình luận về chính cơ chế đang giấu bớt đi.
+                # Harness thật có cả một họ như vậy: turn/start, step/start,
                 # compaction/*. Nhóm này là lý do `to_messages()` phải là phép
                 # CHIẾU có chọn lọc chứ không phải phép đổi dạng 1-1.
                 continue
             else:
                 raise ValueError(f"event type không biết: {kind!r}")
         return messages
+
+
+# Lời dẫn đứng trước bản tóm tắt. Model-facing nên viết tiếng Anh. Lấy gần
+# nguyên văn compaction-basic, vì mỗi câu ở đó chữa một lỗi hành vi cụ thể:
+# "established background" chặn model đi xác minh lại những gì đã chốt;
+# "without restating it" chặn nó mở đầu bằng cách kể lại cả bản tóm tắt;
+# "without acknowledging this checkpoint" chặn nó nói với user về một cơ chế
+# nội bộ mà user không hỏi.
+#
+# Câu cuối là của riêng bản này: ở đây log là append-only và cũng chính là kho
+# spill, nên tool result trong vùng đã nén VẪN đọc lại được. Upstream không nói
+# được câu đó vì bên đó surface bị thay thật.
+#
+# Và cũng như `_prune_text`: nêu sự thật, KHÔNG nhắc tên tool nào. Session
+# không biết agent đang chạy cầm tool gì.
+_CHECKPOINT_PREAMBLE = (
+    "This is an automatically generated checkpoint condensing an earlier span "
+    "of the conversation to free up context. Treat the captured context as "
+    "established background and build on it without restating it. Continue the "
+    "task directly from the messages that follow, without acknowledging this "
+    "checkpoint. Tool results from the condensed span are still stored and "
+    "retrievable by their call_id."
+)
+
+
+def _summary_event(summary: str) -> dict[str, Any]:
+    """Đóng khung bản tóm tắt thành một event `user` để chiếu đi.
+
+    Vai `user` chứ không phải `system`: system message chèn giữa hội thoại là
+    thứ mỗi provider xử một kiểu, có chỗ còn từ chối. `user` thì provider nào
+    cũng nhận. Upstream cũng thay bằng đúng một `user/message`.
+
+    Thẻ `<compacted-summary>` là ranh giới để model phân biệt "đây là ghi chép
+    về hội thoại" với "đây là lời user nói". Thiếu thẻ, model dễ đọc bản tóm
+    tắt như một yêu cầu mới.
+    """
+    return {
+        "type": "user",
+        "content": (
+            f"{_CHECKPOINT_PREAMBLE}\n\n"
+            f"<compacted-summary>\n{summary}\n</compacted-summary>"
+        ),
+    }
 
 
 def _split_turns(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:

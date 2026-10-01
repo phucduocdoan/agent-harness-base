@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Protocol
 
+from mini_harness.core.compaction import CompactionSession, maybe_compact
 from mini_harness.core.types import AssistantMessage, ToolResult
 
 # ------------------------------------------------------------------- protocols
@@ -61,8 +62,12 @@ class Tools(Protocol):
         ...
 
 
-class Session(Protocol):
-    """Append-only event log của một cuộc hội thoại."""
+class Session(CompactionSession, Protocol):
+    """Append-only event log của một cuộc hội thoại.
+
+    Kế thừa `CompactionSession` thay vì chép lại hai method của nó: chủ sở hữu
+    contract đó là `core/compaction.py` (nó là nơi dùng), loop chỉ chuyển tiếp.
+    """
 
     def append(self, event: dict[str, Any]) -> None:
         """Ghi thêm một event. Không sửa, không xoá."""
@@ -119,6 +124,16 @@ async def run_turn(
     session.append({"type": "user", "content": user_input})
 
     for _step in range(max_steps):
+        # Nén TRƯỚC khi gọi model, và ở mỗi step chứ không mỗi turn: tool
+        # result là nguồn phình nhanh nhất, mà chúng sinh ra giữa turn. Đợi
+        # tới đầu turn sau thì request vượt cửa sổ đã đi rồi.
+        #
+        # Loop không hỏi "cần nén không" — nó không biết ngân sách, và theo
+        # đúng luật cũ thì nó cũng không được diễn giải con số token nào.
+        # Nó chỉ chuyển cho `maybe_compact` ba thứ chỉ mình nó cầm: llm,
+        # system prompt, và tập tool schema của request kế tiếp.
+        await maybe_compact(session=session, llm=llm, system=system, tools=tools.schemas())
+
         reply = await llm.generate(
             system=system,
             messages=session.to_messages(),

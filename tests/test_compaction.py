@@ -7,7 +7,13 @@ event sẽ phá đúng chỗ đó, nên ở đây đơn vị cắt là trọn m�
 
 from __future__ import annotations
 
+import pytest
+
+from mini_harness.core.compaction import _INSTRUCTION, maybe_compact
 from mini_harness.core.session import Session
+from mini_harness.core.types import AssistantMessage, ToolCall
+from mini_harness.llm.stream import to_wire_tools
+from fakes import FakeLLM
 
 
 def _turn(tag: str, *, size: int = 1, with_tool: bool = False) -> list[dict]:
@@ -280,3 +286,348 @@ def test_log_khong_co_so_do_nao_thi_resume_khong_neo() -> None:
     session = Session(events=[{"type": "user", "content": "chào"}])
     session._recalibrate()
     assert session._calibration == 0
+
+
+# ------------------------------------------------- nén bằng summary do model viết
+
+
+def _compaction(summary: str, covers: int) -> dict:
+    return {"type": "compaction", "content": summary, "covers": covers}
+
+
+def test_summary_dung_thay_khuc_dau_chu_khong_phai_bi_bo() -> None:
+    """Khác biệt duy nhất đáng kể giữa nén và bỏ: nội dung cũ còn nói được."""
+    # covers=2 = trọn turn "a" (user + assistant), turn "b" ở ngoài.
+    events = _flat(_turn("a"), _turn("b")) + [_compaction("A hỏi về X", covers=2)]
+    messages = Session(events=events).to_messages()
+
+    assert messages[0]["role"] == "user"
+    assert "A hỏi về X" in messages[0]["content"]
+    assert "<compacted-summary>" in messages[0]["content"]
+    # Turn "b" nằm sau `covers` nên phải còn NGUYÊN VĂN.
+    assert any("hỏi b" in m["content"] for m in messages[1:])
+    # Turn "a" nằm trong vùng bị nén nên không còn nguyên văn ở đâu cả.
+    assert not any("hỏi a" in m["content"] for m in messages[1:])
+
+
+def test_event_compaction_khong_bao_gio_di_len_wire() -> None:
+    """Nó là event metadata. Chiếu nguyên nó đi là gửi JSON thô cho model."""
+    events = _flat(_turn("a")) + [_compaction("tóm tắt", covers=2)] + _flat(_turn("b"))
+    for message in Session(events=events).to_messages():
+        assert message["role"] in {"user", "assistant", "tool"}
+        assert "covers" not in message["content"]
+
+
+def test_nen_lan_hai_thi_ban_sau_thang() -> None:
+    """Nén lại không sửa bản cũ — nó append bản mới với `covers` lớn hơn.
+
+    Bản cũ rơi vào đúng vùng bản mới đứng thay, nên nó tự biến mất khỏi phép
+    chiếu. Không có bước hoà giải nào, và log vẫn append-only.
+    """
+    events = (
+        _flat(_turn("a"), _turn("b"))
+        + [_compaction("TÓM TẮT CŨ", covers=4)]
+        + _flat(_turn("c"))
+        + [_compaction("TÓM TẮT MỚI", covers=7)]
+    )
+    messages = Session(events=events).to_messages()
+    noi_dung = " ".join(m["content"] for m in messages)
+    assert "TÓM TẮT MỚI" in noi_dung
+    assert "TÓM TẮT CŨ" not in noi_dung
+
+
+def test_chua_cham_nguong_thi_khong_nen() -> None:
+    """Nén tốn một lần gọi model — không được nổ khi chưa cần."""
+    events = _flat(_turn("a", size=100), _turn("b", size=100))
+    rong_rai = Session(events=events, max_tokens=100_000)
+    assert rong_rai.plan_compaction() is None
+
+
+def test_khong_co_ngan_sach_thi_khong_bao_gio_nen() -> None:
+    assert Session(events=_flat(_turn("a", size=5_000))).plan_compaction() is None
+
+
+def test_vuot_nguong_thi_nen_va_giu_lai_turn_moi_nhat() -> None:
+    events = _flat(*[_turn(tag, size=300) for tag in "abcde"])
+    session = Session(events=events, max_tokens=800)
+    plan = session.plan_compaction()
+
+    assert plan is not None
+    assert 0 < plan.covers < len(events)
+    # Điểm cắt phải rơi đúng đầu một turn, nếu không sẽ sinh tool_result mồ côi.
+    assert events[plan.covers]["type"] == "user"
+    # Turn cuối luôn ở ngoài vùng nén.
+    assert plan.covers <= len(events) - len(_turn("e", size=300))
+
+
+def test_vung_nen_la_tien_to_byte_for_byte_cua_request_vua_gui() -> None:
+    """Đây là cái làm prefix cache của provider còn dùng lại được.
+
+    Giữ được là nhờ `_render` ánh xạ từng event độc lập: chiếu-rồi-lấy-tiền-tố
+    bằng đúng lấy-tiền-tố-rồi-chiếu. Mất tính chất đó thì mỗi lần nén phải trả
+    tiền cho toàn bộ hội thoại ở giá uncached.
+
+    Ngân sách ở đây đủ rộng để `_within_budget` chưa phải bỏ gì — đó là trạng
+    thái mà ngưỡng 0.8 sinh ra, và là trạng thái compaction chạy trong thực tế.
+    Trường hợp đã phải bỏ turn thì xem test kế tiếp.
+    """
+    events = _flat(*[_turn(tag, size=300) for tag in "abcde"])
+    session = Session(events=events, max_tokens=1_500)
+    assert len(session.to_messages()) == len(events), "chưa được bỏ turn nào"
+
+    plan = session.plan_compaction()
+    assert plan is not None
+    assert plan.messages == session.to_messages()[: len(plan.messages)]
+
+
+def test_da_phai_bo_turn_thi_van_nen_tu_LOG_chu_khong_tu_request() -> None:
+    """Ngân sách quá chật nên bỏ turn nổ trước nén. Vùng nén lấy từ ĐÂU?
+
+    Lấy từ log. Tức là bản tóm tắt nhìn thấy cả những turn mà request vừa rồi
+    ĐÃ bỏ — nó kéo lại được phần model vừa mất. Cái giá là mất tính tiền tố,
+    nên lần gọi tóm tắt đó không hưởng prefix cache. Đổi một lần trả giá
+    uncached lấy phần nội dung lẽ ra mất hẳn: đáng.
+    """
+    events = _flat(*[_turn(tag, size=300) for tag in "abcde"])
+    session = Session(events=events, max_tokens=800)
+    assert len(session.to_messages()) < len(events), "ngân sách này phải làm bỏ turn"
+
+    plan = session.plan_compaction()
+    assert plan is not None
+    noi_dung = " ".join(m["content"] for m in plan.messages)
+    assert "hỏi a" in noi_dung, "turn đã bị bỏ khỏi request vẫn phải vào bản tóm tắt"
+
+
+def test_mot_turn_khong_the_che_doi_thi_khong_nen() -> None:
+    """Một turn duy nhất ngốn hết ngân sách: compaction không chẻ được nó.
+
+    Đối chiếu compaction/: "balanced summary compaction cannot split one
+    indivisible unit". Trả None còn hơn trả một điểm cắt làm hỏng cặp
+    tool_call/tool_result.
+    """
+    session = Session(events=_flat(_turn("a", size=5_000)), max_tokens=500)
+    assert session.plan_compaction() is None
+
+
+def test_khong_nen_lai_phan_da_nen() -> None:
+    """Nén lại cái đã nén là trả tiền model hai lần cho cùng một đoạn text.
+
+    Phải chạy tới lần nén THỨ HAI mới thử được điều này, nên hội thoại phải
+    phình tiếp sau lần nén đầu — y như lúc chạy thật.
+    """
+    session = Session(events=_flat(*[_turn(tag, size=300) for tag in "abcde"]),
+                      max_tokens=1_500)
+    dau = session.plan_compaction()
+    assert dau is not None
+    assert session.apply_compaction(dau, "TÓM TẮT ĐẦU") is True
+
+    for event in _flat(*[_turn(tag, size=300) for tag in "fghij"]):
+        session.append(event)
+    sau = session.plan_compaction()
+
+    assert sau is not None
+    assert sau.covers > dau.covers, "lần sau phải nén thêm, không nén lại chỗ cũ"
+    noi_dung = " ".join(m["content"] for m in sau.messages)
+    assert "TÓM TẮT ĐẦU" in noi_dung, "bản tóm tắt cũ phải có mặt để model gộp vào"
+    assert "hỏi a" not in noi_dung, "phần đã nén không được gửi lại nguyên văn"
+
+
+def test_summary_khong_lam_ngan_lai_thi_bi_tu_choi() -> None:
+    """Một bản "tóm tắt" dài hơn bản gốc làm ngữ cảnh PHÌNH ra.
+
+    Đối chiếu compaction/: "rejects a summary that does not shrink its source".
+    """
+    events = _flat(*[_turn(tag, size=300) for tag in "abcde"])
+    session = Session(events=events, max_tokens=800)
+    plan = session.plan_compaction()
+    assert plan is not None
+
+    assert session.apply_compaction(plan, "y" * 100_000) is False
+    assert session.apply_compaction(plan, "") is False
+    assert all(event["type"] != "compaction" for event in session.events)
+    assert session.apply_compaction(plan, "tóm tắt ngắn gọn") is True
+    assert session.events[-1]["type"] == "compaction"
+
+
+def test_nen_xong_thi_request_nho_di_that() -> None:
+    """Phép thử cuối cùng: nén phải làm giảm con số, không chỉ đổi hình dạng."""
+    events = _flat(*[_turn(tag, size=300) for tag in "abcde"])
+    session = Session(events=events, max_tokens=800)
+    truoc = session._estimate(session._pruned(session._compacted(session.events)))
+
+    plan = session.plan_compaction()
+    assert plan is not None
+    assert session.apply_compaction(plan, "tóm tắt a..d") is True
+
+    sau = session._estimate(session._pruned(session._compacted(session.events)))
+    assert sau < truoc
+
+
+def test_resume_doc_lai_duoc_log_da_nen(tmp_path) -> None:
+    """Event compaction nằm trong log, nên resume phải chiếu ra y hệt."""
+    log_path = tmp_path / "nen.jsonl"
+    goc = Session(log_path=log_path, max_tokens=800)
+    for event in _flat(*[_turn(tag, size=300) for tag in "abcde"]):
+        goc.append(event)
+    plan = goc.plan_compaction()
+    assert plan is not None
+    assert goc.apply_compaction(plan, "tóm tắt a..d") is True
+
+    tiep = Session.resume(log_path, max_tokens=800)
+    assert tiep.to_messages() == goc.to_messages()
+
+
+def test_nen_xong_van_qua_nguong_nhung_khong_con_gi_de_nen() -> None:
+    """Bản tóm tắt ngắn hơn vùng gốc nhưng vẫn chưa đủ để xuống dưới ngưỡng.
+
+    Không có chốt chặn thì lần sau `plan_compaction` trả về ĐÚNG vùng vừa nén,
+    model tóm tắt lại chính bản tóm tắt của nó, rồi lặp vô hạn — mỗi vòng một
+    lần gọi model. Trả `None` ở đây là nói thật: đã hết chỗ nén, phần còn lại
+    là việc của `_within_budget`.
+    """
+    session = Session(events=_flat(*[_turn(tag, size=300) for tag in "abcde"]),
+                      max_tokens=1_500)
+    plan = session.plan_compaction()
+    assert plan is not None
+    assert session.apply_compaction(plan, "S" * 2_300) is True
+
+    van_qua = session._estimate(session._pruned(session._compacted(session.events)))
+    assert van_qua > 1_500 * Session._COMPACTION_THRESHOLD, "test này cần vẫn quá ngưỡng"
+    assert session.plan_compaction() is None
+
+
+# ----------------------------------------------- phần gọi model (core/compaction.py)
+
+
+def _dong_lon(max_tokens: int = 1_500) -> Session:
+    """Session đã vượt ngưỡng nén."""
+    return Session(events=_flat(*[_turn(tag, size=300) for tag in "abcde"]),
+                   max_tokens=max_tokens)
+
+
+@pytest.mark.asyncio
+async def test_chua_can_nen_thi_khong_goi_model() -> None:
+    """Mỗi lần nén là một lần trả tiền. Không được gọi khi Session bảo chưa cần."""
+    llm = FakeLLM([])
+    session = Session(events=_flat(_turn("a")), max_tokens=100_000)
+
+    assert await maybe_compact(session=session, llm=llm, system="S", tools=[]) is False
+    assert llm.requests == []
+
+
+@pytest.mark.asyncio
+async def test_nen_xong_thi_log_co_event_va_wire_ngan_lai() -> None:
+    session = _dong_lon()
+    truoc = len(session.to_messages())
+    llm = FakeLLM([AssistantMessage(text="checkpoint ngắn gọn về a..d")])
+
+    assert await maybe_compact(session=session, llm=llm, system="S", tools=[]) is True
+    assert session.events[-1]["type"] == "compaction"
+    assert len(session.to_messages()) < truoc
+
+
+@pytest.mark.asyncio
+async def test_request_tom_tat_dung_system_va_tools_y_het() -> None:
+    """Bớt một tool schema là làm nguội prefix cache của cả hội thoại."""
+    session = _dong_lon()
+    llm = FakeLLM([AssistantMessage(text="checkpoint")])
+    tools = [{"name": "calculator", "description": "d", "parameters": {}}]
+
+    await maybe_compact(session=session, llm=llm, system="PERSONA", tools=tools)
+
+    request = llm.requests[0]
+    assert request["system"] == "PERSONA"
+    assert request["tools"] == to_wire_tools(tools)
+
+
+@pytest.mark.asyncio
+async def test_instruction_di_o_message_CUOI_cung() -> None:
+    """Đặt ở đầu thì prefix hết ấm ngay từ byte đầu tiên."""
+    session = _dong_lon()
+    llm = FakeLLM([AssistantMessage(text="checkpoint")])
+
+    await maybe_compact(session=session, llm=llm, system="S", tools=[])
+
+    messages = llm.requests[0]["messages"]
+    assert messages[-1] == {"role": "user", "content": _INSTRUCTION}
+    assert all(_INSTRUCTION not in m["content"] for m in messages[:-1])
+
+
+@pytest.mark.asyncio
+async def test_model_hong_thi_turn_van_chay_tiep() -> None:
+    """Nén hỏng không được làm chết turn — `_within_budget` vẫn đỡ được."""
+    class LLMHong:
+        async def generate(self, **_: object) -> AssistantMessage:
+            raise RuntimeError("502 Bad Gateway")
+
+    session = _dong_lon()
+    assert await maybe_compact(session=session, llm=LLMHong(), system="S", tools=[]) is False
+    assert all(event["type"] != "compaction" for event in session.events)
+    assert session.to_messages(), "vẫn phải chiếu ra được request hợp lệ"
+
+
+@pytest.mark.asyncio
+async def test_nen_hong_thi_ghi_lai_ly_do_vao_log() -> None:
+    """Nén hỏng mà im lặng thì mỗi lượt lại rụng một turn, không ai biết tại sao."""
+    class LLMHong:
+        async def generate(self, **_: object) -> AssistantMessage:
+            raise RuntimeError("502 Bad Gateway")
+
+    session = _dong_lon()
+    await maybe_compact(session=session, llm=LLMHong(), system="S", tools=[])
+
+    hong = session.events[-1]
+    assert hong["type"] == "compaction_failed"
+    assert "502 Bad Gateway" in hong["content"]
+    # Ghi mà KHÔNG chiếu: model không cần đọc chuyện nội bộ của harness.
+    assert all("502" not in m["content"] for m in session.to_messages())
+
+
+@pytest.mark.asyncio
+async def test_model_tra_rong_thi_tu_choi_va_ghi_lai() -> None:
+    session = _dong_lon()
+    llm = FakeLLM([AssistantMessage(text="   ")])
+
+    assert await maybe_compact(session=session, llm=llm, system="S", tools=[]) is False
+    assert session.events[-1]["type"] == "compaction_failed"
+
+
+@pytest.mark.asyncio
+async def test_model_lo_goi_tool_nhung_van_viet_du_thi_van_nhan() -> None:
+    """Chỉ phần text đi vào checkpoint — tool call bị bỏ qua, không phải lỗi.
+
+    Đối chiếu compaction-basic: "only returned text enters the checkpoint,
+    excluding reasoning and tool calls". Coi là lỗi thì một lần model lỡ tay
+    đủ huỷ cả phép nén dù bản tóm tắt vẫn đầy đủ.
+    """
+    session = _dong_lon()
+    llm = FakeLLM([AssistantMessage(
+        text="checkpoint đầy đủ",
+        tool_calls=(ToolCall(id="call_x", name="calculator", arguments_json="{}"),),
+    )])
+
+    assert await maybe_compact(session=session, llm=llm, system="S", tools=[]) is True
+    assert session.events[-1]["content"] == "checkpoint đầy đủ"
+
+
+def test_instruction_khong_bao_model_giau_viec_bi_nen() -> None:
+    """Ràng buộc này do content filter của provider áp, không phải do thẩm mỹ.
+
+    Bản upstream có dòng "Do NOT mention this request, or that the conversation
+    was condensed". Gửi nguyên văn lên Azure thì cả request bị chặn:
+    `jailbreak: {detected: True, filtered: True}`, HTTP 400. Dò từng dòng thì
+    chính dòng đó đứng MỘT MÌNH lại qua được — thứ bị bắt là ngữ cảnh: một
+    instruction dựng sẵn bố cục rồi dặn model đừng nói là mình được dặn, đọc
+    lên đúng dạng prompt injection.
+
+    Nén hỏng thì không chết turn (có `compaction_failed` + `_within_budget` đỡ),
+    nhưng hỏng 100% số lần thì tính năng coi như không tồn tại. Khoá lại ở đây
+    vì cái bẫy là chép nguyên văn upstream về — chuyện rất dễ xảy ra.
+
+    Việc "đừng nhắc tới checkpoint" vẫn còn, nhưng nằm ở phía model ĐỌC bản tóm
+    tắt (`_CHECKPOINT_PREAMBLE`), chứ không phải phía model VIẾT nó.
+    """
+    assert "do not mention" not in _INSTRUCTION.lower()
+    assert "condensed" not in _INSTRUCTION.lower()
+    # Thứ thật sự cần vẫn phải nói ra: đây là bản ghi, không phải một lượt trả lời.
+    assert "standalone record" in _INSTRUCTION

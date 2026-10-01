@@ -19,6 +19,7 @@ muốn tra cứu. Comment trong code có dòng "Đối chiếu: …" trỏ tới
 ```
 mini_harness/
   core/    types.py  loop.py  session.py     # không import implementation nào
+           compaction.py                     # nén khúc đầu bằng summary model viết
            prompt.py  agent.py               # ráp system prompt; agent = dữ liệu
   llm/     stream.py  deepseek.py  azure.py  # chỗ duy nhất biết wire format
   tools/   registry.py  calculator.py  write_file.py  web_search.py
@@ -33,12 +34,24 @@ mini_harness/
 Session) rồi lái vòng lặp. Đổi provider hay thêm tool không cần sửa nó. Session
 là **event log append-only**; message list gửi cho model là thứ *phái sinh*
 (`to_messages()`) — đó là cái làm resume, replay và **compaction** khả thi: cắt
-ngữ cảnh cho vừa cửa sổ model là cắt ở phép chiếu, log vẫn nguyên vẹn. Hai thứ
-bị cắt ở đó: turn cũ nhất, và ruột của tool result quá khổ (giữ đầu + đuôi).
+ngữ cảnh cho vừa cửa sổ model là cắt ở phép chiếu, log vẫn nguyên vẹn.
+
+Ba phép cắt, xếp theo mức mất mát **tăng dần** — thứ tự đó là toàn bộ thiết kế:
+
+1. **nén** — khúc đầu hội thoại được thay bằng một bản tóm tắt *do chính model
+   viết* (`core/compaction.py`). Mất chi tiết, giữ lại ý. Đây là phép cắt duy
+   nhất tốn một lần gọi model, nên nó nổ ở ngưỡng 0.8 ngân sách chứ không đợi
+   tràn — còn kịp chỗ cho chính request tóm tắt.
+2. **cắt ruột tool result** quá khổ, giữ đầu + đuôi. Gần như không mất gì.
+3. **bỏ trọn turn cũ nhất.** Mất hẳn, không có đường về — nên nó là *lưới an
+   toàn*, chỉ chạy khi hai bước trên đã làm hết sức mà vẫn chưa vừa.
+
 Chỗ bị cắt để lại **locator**, và tool `read_spill` cầm locator đó đọc ngược vào
 log — nên cắt là *cất đi*, không phải *huỷ*. Kho spill không phải thứ dựng thêm:
-nó chính là event log. Ngân sách cũng không đoán suông — `usage` mà API trả về ở
-response trước được dùng để neo lại bộ ước lượng.
+nó chính là event log. Điều đó đúng cả bên trong vùng đã nén: bản tóm tắt nói
+thẳng với model rằng tool result ở đó vẫn gọi lại được bằng `call_id`. Ngân sách
+cũng không đoán suông — `usage` mà API trả về ở response trước được dùng để neo
+lại bộ ước lượng.
 
 Một **loại agent** (`general`, `tutor`, …) là *dữ liệu*, không phải class con:
 persona + tập tool. Thêm agent mới không sửa dòng nào trong `core/loop.py` hay

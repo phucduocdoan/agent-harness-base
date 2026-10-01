@@ -11,6 +11,7 @@ import lại bao giờ (Protocol là structural typing), nên chúng thuộc v�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 # Những gì đi qua biên giữa loop và ba service. Loop sở hữu các type này vì loop
 # là consumer; implementation chỉ cần khớp cấu trúc.
@@ -57,3 +58,23 @@ class ToolResult:
     content: str
     is_error: bool = False
 
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionPlan:
+    """Dự định nén: nén tới đâu, và gửi gì đi để xin bản tóm tắt.
+
+    Session dựng ra record này vì chỉ Session mới ĐO được (ngân sách, phép
+    chiếu, phép neo token). `core/compaction.py` tiêu thụ nó vì chỉ nó mới GỌI
+    được model. Tách ra làm hai chỗ để không bên nào phải biết việc của bên
+    kia — và record này là đúng cái đi qua biên đó, nên nó thuộc về file này.
+
+    `messages` đã ở wire format và CỐ Ý là tiền tố byte-for-byte của request
+    gần nhất: cùng thứ tự, cùng nội dung, chỉ ngắn hơn. Nhờ vậy prompt cache
+    của provider dùng lại được tới sát message instruction. Đối chiếu
+    compaction-basic: "Summarization reuses the provider's warm prefix".
+    """
+
+    # Số event ở ĐẦU log mà bản tóm tắt sẽ đứng thay.
+    covers: int
+    messages: list[dict[str, Any]]
