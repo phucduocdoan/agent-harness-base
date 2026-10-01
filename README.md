@@ -28,7 +28,8 @@ mini_harness/
 Ý chính: `core/loop.py` chỉ khai báo Protocol cho ba thứ nó cần (LLM, Tools,
 Session) rồi lái vòng lặp. Đổi provider hay thêm tool không cần sửa nó. Session
 là **event log append-only**; message list gửi cho model là thứ *phái sinh*
-(`to_messages()`) — đó là cái làm resume/replay khả thi.
+(`to_messages()`) — đó là cái làm resume, replay và **compaction** khả thi: cắt
+ngữ cảnh cho vừa cửa sổ model là cắt ở phép chiếu, log vẫn nguyên vẹn.
 
 ### Chạy
 

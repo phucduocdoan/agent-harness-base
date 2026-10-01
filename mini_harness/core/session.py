@@ -40,6 +40,10 @@ class Session:
     # agent loop (loop không sở hữu việc hiển thị) và cũng không phải từ tool
     # registry (nó không biết mình đang chạy trong phiên nào).
     on_event: Callable[[dict[str, Any]], None] | None = None
+    # Ngân sách token cho message list. None = không cắt gì (mặc định, vì
+    # `core/` không có quyền đoán cửa sổ của model nào). Chủ sở hữu con số này
+    # là app.py — nó mới biết đang chạy provider nào.
+    max_tokens: int | None = None
 
     def append(self, event: dict[str, Any]) -> None:
         self.events.append(event)
@@ -104,14 +108,55 @@ class Session:
             if call["id"] not in answered
         ]
 
+    # ------------------------------------------------------- ngân sách token
+    # Ước lượng THÔ, cố ý nghiêng về phía đoán thừa: đoán thiếu nghĩa là tưởng
+    # còn chỗ trong khi đã tràn — đúng cái crash đang muốn tránh. Đo bằng
+    # tiktoken o200k_base: tiếng Anh 4.87 ký tự/token, tiếng Việt 3.35, JSON
+    # 2.53. Lấy theo trường hợp tệ nhất.
+    #
+    # Không import tiktoken ở đây dù nó chính xác hơn: `core/` mà biết
+    # tokenizer của một provider cụ thể là phá seam. Harness thật giải bằng
+    # cách khác và tốt hơn — đọc `usage` mà API TRẢ VỀ ở response trước, tức là
+    # số thật chứ không phải số đoán. Muốn nâng cấp thì đi đường đó.
+    _CHARS_PER_TOKEN = 2.5
+    # Mỗi message còn tốn phần bao: role, delimiter của wire format.
+    _TOKENS_PER_MESSAGE = 4
+
+    def _within_budget(self) -> list[dict[str, Any]]:
+        """Bỏ bớt turn cũ cho vừa `max_tokens`. KHÔNG sửa `self.events`."""
+        if self.max_tokens is None:
+            return self.events
+        turns = _split_turns(self.events)
+        # Bỏ TRỌN từng turn từ cũ nhất. Cắt lẻ từng event sẽ để lại
+        # `tool_result` mồ côi không có `tool_call` đi kèm, và API từ chối
+        # nguyên request — hỏng nặng hơn hẳn so với việc tràn cửa sổ.
+        while len(turns) > 1 and self._estimate(turns) > self.max_tokens:
+            turns.pop(0)
+        # Luôn giữ turn cuối cùng kể cả khi một mình nó đã vượt ngân sách: bỏ
+        # nốt thì chẳng còn gì để hỏi model. Quá cỡ ở đây là việc của tầng
+        # khác (cắt nhỏ chính câu hỏi), không phải của compaction.
+        return [event for turn in turns for event in turn]
+
+    def _estimate(self, turns: list[list[dict[str, Any]]]) -> int:
+        count = 0
+        for turn in turns:
+            for event in turn:
+                text = json.dumps(event, ensure_ascii=False)
+                count += int(len(text) / self._CHARS_PER_TOKEN) + self._TOKENS_PER_MESSAGE
+        return count
+
     def to_messages(self) -> list[dict[str, Any]]:
         """Chiếu log thành message list đúng wire format của OpenAI/DeepSeek.
 
         Một chiều: event -> message. Không có đường ngược lại, và không sửa
         `self.events`. Gọi bao nhiêu lần cũng ra cùng kết quả.
+
+        Có `max_tokens` thì phép chiếu này LOSSY: turn cũ bị bỏ khỏi message
+        list, nhưng vẫn nằm nguyên trong log. Đó chính là lý do tách log khỏi
+        projection ngay từ đầu — cắt ngữ cảnh mà không mất dữ liệu.
         """
         messages: list[dict[str, Any]] = []
-        for event in self.events:
+        for event in self._within_budget():
             kind = event["type"]
             if kind == "user":
                 messages.append({"role": "user", "content": event["content"]})
@@ -140,3 +185,17 @@ class Session:
             else:
                 raise ValueError(f"event type không biết: {kind!r}")
         return messages
+
+
+def _split_turns(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Chẻ log thành từng turn. Một turn bắt đầu ở mỗi event `user`.
+
+    Định nghĩa này làm cho "bỏ trọn một turn" không bao giờ tạo ra mồ côi:
+    `assistant` và `tool_result` luôn nằm cùng nhóm với `user` đã sinh ra chúng.
+    """
+    turns: list[list[dict[str, Any]]] = []
+    for event in events:
+        if event["type"] == "user" or not turns:
+            turns.append([])
+        turns[-1].append(event)
+    return turns

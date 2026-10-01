@@ -33,6 +33,15 @@ from mini_harness.tools.write_file import write_file_tool
 ROOT = Path(__file__).resolve().parent.parent
 SANDBOX = ROOT / "sandbox"
 
+# Ngân sách token cho message list. Con số này ở ĐÂY chứ không ở core/ vì chỉ
+# app.py mới biết đang chạy provider nào và cửa sổ của nó bao nhiêu.
+#
+# Để thấp hơn cửa sổ thật (128k của gpt-4o) rất nhiều, có chủ ý: bộ đếm trong
+# session chỉ là ước lượng, và nó KHÔNG đếm hai thứ cũng chiếm chỗ trong cùng
+# request — system prompt và tool schema. Phần dư là chỗ cho chúng cộng với
+# output model sắp sinh ra.
+MAX_TOKENS = 60_000
+
 SYSTEM = (
     "You are a helpful assistant. Use the calculator tool for any arithmetic "
     "instead of computing it yourself. Answer in Vietnamese."
@@ -114,6 +123,10 @@ async def main() -> int:
         print(f"(resume {len(session.events)} event từ {session_path})")
     else:
         session = Session(log_path=session_path)
+
+    # Đặt sau mọi nhánh dựng session, kể cả `resume`: ngân sách là chính sách
+    # lúc chạy, không phải thuộc tính của cái log trên đĩa.
+    session.max_tokens = MAX_TOKENS
 
     tools = build_tools(ask_terminal)
     if question is None:
