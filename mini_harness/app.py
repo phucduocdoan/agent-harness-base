@@ -31,6 +31,7 @@ from mini_harness.llm.deepseek import DeepSeekLLM
 from mini_harness.llm.replay import ReplayLLM
 from mini_harness.profiles import DEFAULT_AGENT, PROFILES
 from mini_harness.tools.calculator import calculator_tool
+from mini_harness.tools.read_spill import read_spill_tool
 from mini_harness.tools.registry import Approver, ToolRegistry
 from mini_harness.tools.web_search import web_search_tool
 from mini_harness.tools.write_file import write_file_tool
@@ -69,7 +70,9 @@ PROVIDERS = {
 
 
 def build_tools(
-    allow: tuple[str, ...], approver: Approver | None = None
+    allow: tuple[str, ...],
+    approver: Approver | None = None,
+    session: Session | None = None,
 ) -> ToolRegistry:
     """Đăng ký tool mà profile cho phép. Liệt kê tay, KHÔNG auto-discover.
 
@@ -109,6 +112,15 @@ def build_tools(
                 "tool web_search cần TAVILY_API_KEY trong .env (lấy ở tavily.com)"
             )
         available["web_search"] = web_search_tool(api_key)
+    # `read_spill` đọc ngược vào log, nên nó cần chính session đang chạy. Cùng
+    # dạng với TAVILY_API_KEY ở trên: thứ tool cần mà chỉ wiring mới có, và
+    # thiếu thì DỪNG. Im lặng bỏ tool thì agent vẫn chạy, chỉ là mỗi lần tool
+    # result bị cắt nó lại mất hẳn khúc giữa — mà marker vẫn bảo "vẫn lấy
+    # lại được".
+    if "read_spill" in allow:
+        if session is None:
+            raise ValueError("tool read_spill cần session; build_tools(session=...)")
+        available["read_spill"] = read_spill_tool(session)
     unknown = sorted(set(allow) - set(available))
     if unknown:
         raise ValueError(f"profile gọi tool không có: {unknown}")
@@ -225,7 +237,7 @@ async def main() -> int:
 
     system = build_system_prompt(profile)
     try:
-        tools = build_tools(profile.tools, ask_terminal)
+        tools = build_tools(profile.tools, ask_terminal, session)
     except ValueError as error:
         # Thiếu credential là lỗi của người chạy, không phải bug — traceback ở
         # đây chỉ làm người đọc phải lội tìm dòng cuối.

@@ -227,7 +227,7 @@ class Session:
         if limit is None:
             return events
         return [
-            {**event, "content": _prune_text(event["content"], limit)}
+            {**event, "content": _prune_text(event["content"], limit, event["call_id"])}
             if event["type"] == "tool_result" and len(event["content"]) > limit
             else event
             for event in events
@@ -318,8 +318,8 @@ def _split_turns(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return turns
 
 
-def _prune_text(text: str, limit: int) -> str:
-    """Giữ đầu và ĐUÔI của một tool result, nói rõ phần giữa đã mất.
+def _prune_text(text: str, limit: int, call_id: str) -> str:
+    """Giữ đầu và ĐUÔI của một tool result, nói rõ phần giữa đi đâu.
 
     Giữ cả đuôi chứ không cắt cụt: kết luận của một bài viết nằm ở cuối, và
     thông báo lỗi của một lệnh dài cũng nằm ở cuối. Cắt cụt đuôi là bỏ đúng
@@ -327,13 +327,24 @@ def _prune_text(text: str, limit: int) -> str:
 
     Marker là model-facing text nên viết tiếng Anh, và phải nói ra con số: một
     tool result bị cắt mà im lặng sẽ được model đọc như một kết quả đầy đủ.
-    Nó cũng là lời mời model thu hẹp truy vấn rồi gọi lại.
+
+    Marker mang theo LOCATOR — `call_id` và dải offset bị giấu — chứ không chỉ
+    nói "đã cắt". Phần giữa không mất: nó vẫn nằm nguyên trong `self.events`,
+    và `tools/read_spill.py` đọc ngược vào đó. Cắt ở phép chiếu là CẤT ĐI,
+    không phải HUỶ.
+
+    Nhưng marker KHÔNG nhắc tên tool nào. Session không biết agent đang chạy
+    cầm những tool gì, nên nói "dùng read_spill" là nói một câu có thể sai.
+    Nó chỉ nêu sự thật và cái locator; dạy cách dùng locator là việc của
+    description bên tool. Cùng một đường biên upstream vạch cho `spill/`:
+    "The service owns storage only: ... no retrieval or search API."
 
     `limit` tính trên nội dung GỐC giữ lại; marker nằm ngoài con số đó.
 
     Đối chiếu: compaction/compaction-tool-result-pruner — "trims each
     over-budget tool result to a bounded head, a short 'middle pruned' marker,
-    and a bounded tail".
+    and a bounded tail"; spill/spill-policy — "replaces the model-facing result
+    with a bounded head/tail preview plus the backend's locator".
     """
     # Đầu nhiều hơn đuôi: phần mở đầu thường đã nói chủ đề là gì, còn đuôi chỉ
     # cần đủ để thấy kết luận.
@@ -341,6 +352,8 @@ def _prune_text(text: str, limit: int) -> str:
     tail = limit - head
     return (
         text[:head]
-        + f"\n\n[... {len(text) - limit} characters pruned from the middle ...]\n\n"
+        + f"\n\n[... {len(text) - limit} characters hidden here: offsets "
+        f"{head}-{len(text) - tail} of this {len(text)}-character result, "
+        f'call_id "{call_id}". The full text is still stored and retrievable. ...]\n\n'
         + text[len(text) - tail:]
     )

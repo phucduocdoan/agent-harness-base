@@ -22,6 +22,7 @@ mini_harness/
            prompt.py  agent.py               # ráp system prompt; agent = dữ liệu
   llm/     stream.py  deepseek.py  azure.py  # chỗ duy nhất biết wire format
   tools/   registry.py  calculator.py  write_file.py  web_search.py
+           read_spill.py                              # đọc lại khúc đã cắt
   cli/     terminal.py  chat.py              # chỗ duy nhất in ra màn hình
   context.py                                 # giờ, workspace — chạm thế giới thật
   profiles.py                                # general, tutor, research
@@ -33,8 +34,10 @@ Session) rồi lái vòng lặp. Đổi provider hay thêm tool không cần s�
 là **event log append-only**; message list gửi cho model là thứ *phái sinh*
 (`to_messages()`) — đó là cái làm resume, replay và **compaction** khả thi: cắt
 ngữ cảnh cho vừa cửa sổ model là cắt ở phép chiếu, log vẫn nguyên vẹn. Hai thứ
-bị cắt ở đó: turn cũ nhất, và ruột của tool result quá khổ (giữ đầu + đuôi, nói
-rõ mất bao nhiêu ký tự). Ngân sách không đoán suông — `usage` mà API trả về ở
+bị cắt ở đó: turn cũ nhất, và ruột của tool result quá khổ (giữ đầu + đuôi).
+Chỗ bị cắt để lại **locator**, và tool `read_spill` cầm locator đó đọc ngược vào
+log — nên cắt là *cất đi*, không phải *huỷ*. Kho spill không phải thứ dựng thêm:
+nó chính là event log. Ngân sách cũng không đoán suông — `usage` mà API trả về ở
 response trước được dùng để neo lại bộ ước lượng.
 
 Một **loại agent** (`general`, `tutor`, …) là *dữ liệu*, không phải class con:

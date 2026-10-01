@@ -91,12 +91,13 @@ def test_moi_ket_qua_deu_co_url():
 # ------------------------------------------------------------------- wiring
 
 
-def test_research_cam_web_search_va_write_file(monkeypatch):
+def test_research_cam_web_search_write_file_va_read_spill(monkeypatch):
     from mini_harness.app import build_tools
+    from mini_harness.core.session import Session
 
     monkeypatch.setenv("TAVILY_API_KEY", "key-gia")
-    names = {schema["name"] for schema in build_tools(RESEARCH.tools).schemas()}
-    assert names == {"web_search", "write_file"}
+    names = {s["name"] for s in build_tools(RESEARCH.tools, session=Session()).schemas()}
+    assert names == {"web_search", "write_file", "read_spill"}
 
 
 def test_thieu_api_key_thi_dung_ngay_chu_khong_bo_tool(monkeypatch):

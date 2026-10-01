@@ -129,15 +129,40 @@ def test_tool_result_qua_kho_giu_dau_va_duoi() -> None:
 
     assert content.startswith("ĐẦU")
     assert content.endswith("ĐUÔI")
-    assert len(content) < 1_300, "giữ gần đúng trần, cộng marker"
+    assert len(content) < 1_400, "giữ gần đúng trần, cộng marker"
 
 
 def test_cat_roi_thi_phai_noi_ra_la_da_cat() -> None:
     """Im lặng thì model đọc một kết quả cụt như thể nó đầy đủ."""
     session = Session(events=_tool_turn("a", "x" * 50_000), max_tool_result_chars=1_000)
     content = _tool_message(session)["content"]
-    assert "pruned" in content
+    assert "hidden" in content
     assert str(50_000 - 1_000) in content, "phải nói mất bao nhiêu ký tự"
+
+
+def test_marker_mang_theo_locator() -> None:
+    """Cắt mà không để lại locator thì phần giữa coi như mất, dù log còn giữ.
+
+    Locator là cái biến "đã huỷ" thành "đã cất": `call_id` để tìm lại tool
+    result, dải offset để biết xin khúc nào.
+    """
+    session = Session(events=_tool_turn("abc123", "x" * 50_000),
+                      max_tool_result_chars=1_000)
+    content = _tool_message(session)["content"]
+    assert 'call_id "call_abc123"' in content
+    assert "666-49666" in content, "phải nói khúc nào đang bị giấu"
+    assert "50000-character" in content
+
+
+def test_marker_khong_nhac_ten_tool_nao() -> None:
+    """Session không biết agent đang cầm tool gì, nên nói tên tool là nói liều.
+
+    `tutor` không có tool nào; một marker bảo nó gọi `read_spill` là chỉ nó
+    vào một thứ không tồn tại. Session nêu sự thật + locator, tool tự dạy cách
+    dùng locator — đúng đường biên upstream vạch cho `spill/`.
+    """
+    session = Session(events=_tool_turn("a", "x" * 50_000), max_tool_result_chars=1_000)
+    assert "read_spill" not in _tool_message(session)["content"]
 
 
 def test_log_van_giu_ban_day_du_sau_khi_chieu() -> None:

@@ -58,7 +58,11 @@ RESEARCH = AgentProfile(
         "cover the question, say so plainly instead of filling the gap. "
         "Answer in Vietnamese."
     ),
-    tools=("web_search", "write_file"),
+    # `read_spill` chỉ ở ĐÂY, không ở general: nó chỉ có nghĩa khi agent có một
+    # tool thật sự sinh ra kết quả quá khổ. calculator và write_file trả vài
+    # dòng, không bao giờ chạm trần cắt — cấp read_spill cho general là thêm
+    # một schema model không bao giờ dùng vào mọi request.
+    tools=("web_search", "write_file", "read_spill"),
 )
 
 PROFILES = {profile.name: profile for profile in (GENERAL, TUTOR, RESEARCH)}
