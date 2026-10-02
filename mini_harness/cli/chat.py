@@ -97,7 +97,8 @@ async def _compact_now(
     # event nào mới nghĩa là Session nói "không còn gì để nén", chưa gọi model.
     cuoi = session.events[-1] if session.events else {}
     ly_do = (cuoi["content"] if cuoi.get("type") == "compaction_failed"
-             else "không còn turn cũ nào để nén")
+             else "cả hội thoại vẫn nằm gọn trong vùng giữ nguyên văn, "
+                  "chưa có turn nào đủ cũ để tóm tắt")
     print(f"(không nén được: {ly_do})")
 
 
