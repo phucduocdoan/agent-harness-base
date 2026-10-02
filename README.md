@@ -1,123 +1,59 @@
 # agent-harness-base
 
-Học kiến trúc agent harness bằng cách **đọc một harness thật rồi tự dựng lại bản tối giản**.
+Học kiến trúc agent harness bằng cách **đọc một harness thật rồi tự dựng lại bản
+tối giản**. Bản tự viết nằm ở `mini_harness/` — Python, không framework, chạy
+được thật với Azure OpenAI hoặc DeepSeek.
 
-Harness được đọc để đối chiếu là [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)
-(TypeScript, MIT) — repo đó không nằm trong đây, clone riêng cạnh thư mục này nếu
-muốn tra cứu. Comment trong code có dòng "Đối chiếu: …" trỏ tới file tương ứng bên đó.
+Harness được đọc để đối chiếu là
+[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)
+(TypeScript, MIT). Repo đó không nằm trong đây — clone riêng cạnh thư mục này nếu
+muốn tra cứu; comment trong code có dòng `Đối chiếu: …` trỏ tới file tương ứng.
 
-## Trong repo
+## Một turn đi qua đâu
 
-| | |
-|---|---|
-| [`docs/how-to-learn.md`](docs/how-to-learn.md) | Thứ tự đọc, không đọc repo từ đầu đến cuối |
-| [`docs/deepseek_harness_cordis_study_notes.md`](docs/deepseek_harness_cordis_study_notes.md) | Ghi chú kiến trúc: Cordis runtime + core packages |
-| `mini_harness/`, `tests/` | Bản Python tối giản, tự viết |
-
-## Harness tối giản
-
-```
-mini_harness/
-  core/    types.py  loop.py  session.py     # không import implementation nào
-           compaction.py                     # nén khúc đầu bằng summary model viết
-           prompt.py  agent.py               # ráp system prompt; agent = dữ liệu
-  llm/     stream.py  deepseek.py  azure.py  # chỗ duy nhất biết wire format
-  tools/   registry.py  calculator.py  write_file.py  web_search.py
-           read_spill.py                              # đọc / tìm trong khúc đã cắt
-           task.py                                    # giao việc cho sub-agent
-  cli/     terminal.py  chat.py              # chỗ duy nhất in ra màn hình
-  context.py                                 # giờ, workspace — chạm thế giới thật
-  profiles.py                                # general, tutor, research, lead
-  app.py                                     # chỗ duy nhất biết tất cả những thứ trên
+```mermaid
+flowchart TD
+    U(["bạn gõ một câu"]) --> C
+    C["<b>chat loop</b> · cli/chat.py<br>một vòng = một turn<br><i>Ctrl-C huỷ turn, không giết process</i>"] --> R
+    R["<b>run_turn</b> · core/loop.py<br>một vòng = một step"]
+    R -- "messages = to_messages()" --> L["<b>LLM</b> · llm/<br><i>chỗ duy nhất biết wire format</i>"]
+    L -- "AssistantMessage" --> R
+    R -- "có tool_calls" --> T["<b>ToolRegistry</b> · tools/<br>validate → xin phép → chạy"]
+    T -- "ToolResult" --> R
+    R == "hết tool_call: text cuối" ==> C
+    R -- "append" --> S[("<b>Session</b><br>event log append-only")]
+    S -- "chiếu, có cắt" --> R
 ```
 
-Ý chính: `core/loop.py` chỉ khai báo Protocol cho ba thứ nó cần (LLM, Tools,
-Session) rồi lái vòng lặp. Đổi provider hay thêm tool không cần sửa nó. Session
-là **event log append-only**; message list gửi cho model là thứ *phái sinh*
-(`to_messages()`) — đó là cái làm resume, replay và **compaction** khả thi: cắt
-ngữ cảnh cho vừa cửa sổ model là cắt ở phép chiếu, log vẫn nguyên vẹn.
+Ba thứ cần nhớ, phần còn lại suy ra được:
 
-Ba phép cắt, xếp theo mức mất mát **tăng dần**:
+1. **`core/` không import implementation nào.** `run_turn` chỉ biết ba Protocol —
+   LLM, Tools, Session. Đổi provider hay thêm tool không sửa một dòng trong đó.
+2. **Session là event log append-only**; message list gửi cho model là thứ *phái
+   sinh* (`to_messages()`). Cắt ngữ cảnh cho vừa cửa sổ model là cắt ở **phép
+   chiếu**, log vẫn nguyên vẹn — đó là cái làm resume, replay và nén khả thi.
+3. **Một loại agent là dữ liệu**, không phải class con: persona + tập tool.
 
-1. **nén** — khúc đầu hội thoại được thay bằng một bản tóm tắt *do chính model
-   viết* (`core/compaction.py`). Mất chi tiết, giữ lại ý. Đây là phép cắt duy
-   nhất tốn một lần gọi model, nên nó nổ ở ngưỡng 0.8 ngân sách chứ không đợi
-   tràn — còn kịp chỗ cho chính request tóm tắt.
-2. **cắt ruột tool result** quá khổ, giữ đầu + đuôi. Gần như không mất gì.
-3. **bỏ trọn turn cũ nhất.** Mất hẳn, không có đường về — nên nó là *lưới an
-   toàn*, chỉ chạy khi hai bước trên đã làm hết sức mà vẫn chưa vừa.
+Vì sao xếp như vậy, và chỗ nào thì khác Codex / Claude Code:
+[`docs/kien-truc.md`](docs/kien-truc.md).
 
-Thứ tự đó không phải luật của ngành. Nó là **hệ quả** của việc tách log khỏi
-phép chiếu, và chỉ phát biểu được vì cả ba phép cắt đều xảy ra ở phép chiếu.
-Codex không xếp được ba phép này, vì với nó câu hỏi không tồn tại: tool result
-bị cắt ruột ngay lúc *ghi vào history*, mất vĩnh viễn, xong trước khi phép nén
-kịp được cân nhắc; còn việc bỏ item cũ nhất chỉ chạy bên trong vòng retry của
-chính phép nén, khi request tóm tắt tự nó bị API trả `ContextWindowExceeded`.
-Ba phép cắt có thứ tự là thứ bạn **được** khi log còn nguyên, không phải thứ
-phải có (`docs/codex_study_notes.md`).
+## Có gì
 
-Và ba không phải là hết. Claude Code có phép cắt thứ tư mà `mini_harness` không
-có: khi mô tả tool chiếm quá 10% cửa sổ, nó hoãn chính *định nghĩa tool* lại và
-bắt model đi tìm khi cần (`MCPSearch`). Phép đó cắt ở schema chứ không cắt ở
-message — một trục khác hẳn, và nó chỉ đáng làm khi số tool đã lớn
-(`docs/claude_code_study_notes.md`).
+- **Ngữ cảnh**: ba phép cắt xếp theo mức mất mát tăng dần (nén → cắt ruột tool
+  result → bỏ turn cũ), tất cả ở phép chiếu. Chỗ bị cắt để lại locator, tool
+  `read_spill` đọc và tìm ngược vào log.
+- **Nén** bằng bản tóm tắt *do chính model viết*, tự nổ ở ngưỡng 0.8 ngân sách,
+  hoặc gõ `/compact`. Ngân sách neo lại theo `usage` API trả về, không đoán suông.
+- **Sub-agent**: `task` chạy một agent khác trong `Session` riêng, ngân sách
+  riêng; cha chỉ nhận lại đúng đoạn text cuối. Model tự gọi, hoặc người dùng gõ
+  `/task <agent> <việc>`.
+- **Log bền**: `--session` ghi/resume, `--replay` phát lại log cũ không cần API key.
+- **Tool registry**: JSON Schema validate trước khi chạy, cổng xin phép, và mọi
+  lỗi thành kết quả model đọc được chứ không thành exception.
+- **Bốn agent** sẵn có: `general`, `tutor` (cố tình không có tool), `research`,
+  `lead`.
 
-Chỗ bị cắt để lại **locator**, và tool `read_spill` cầm locator đó đọc ngược vào
-log — nên cắt là *cất đi*, không phải *huỷ*. Nó còn tìm được (`query`), vì một
-kết quả bị giấu có thể dài hàng chục nghìn ký tự và model không có cách nào
-đoán ra nên đọc ở offset nào. Cặp đọc + tìm đó không phải phát minh gì: các
-harness khác ghi spill ra **file**, nên `read` và `grep` sẵn có của chúng đã
-làm đúng việc này. Ở đây kho spill là event log chứ không phải filesystem, nên
-cặp công cụ đó phải dựng lại trên nền khác. Kho spill không phải thứ dựng thêm:
-nó chính là event log. Điều đó đúng cả bên trong vùng đã nén: bản tóm tắt nói
-thẳng với model rằng tool result ở đó vẫn gọi lại được bằng `call_id`. Ngân sách
-cũng không đoán suông — `usage` mà API trả về ở response trước được dùng để neo
-lại bộ ước lượng.
-
-Một **loại agent** (`general`, `tutor`, …) là *dữ liệu*, không phải class con:
-persona + tập tool. Thêm agent mới không sửa dòng nào trong `core/loop.py` hay
-`tools/registry.py` — đó là phép thử của các seam phía trên.
-
-### Uỷ quyền: trục thứ hai
-
-Cả ba phép cắt ở trên — kể cả phép thứ tư của Claude Code — đều chữa một log
-**đã** phình. Tool `task` đi trục khác: việc giao cho sub-agent chạy trong một
-`Session` riêng của nó, và cha chỉ nhận lại đúng đoạn text cuối. Không phải
-"cắt bớt cái đã to", mà là "đừng để nó to lên ở chỗ cha".
-
-Đo thật, một câu hỏi buộc `lead` giao việc tra cứu cho `research`: con đi 4
-step, đọc 26.435 ký tự tool result, đốt 13.984 token; cha nhận lại 3.113 ký tự
-và request cuối của cha được API đo **1.318 token**. Dựng lại phản-thực bằng
-chính bộ ước lượng của `Session` — cùng hội thoại đó nhưng cha tự làm lấy —
-cửa sổ cha là ~13.770 thay vì ~2.647: **5,2 lần**. Và tỷ lệ đó còn mở ra theo
-mỗi step con đi thêm, trong khi cha đứng yên.
-
-Hai thứ dễ gộp nhầm vì cùng đo bằng "token". Cửa sổ ngữ cảnh tính theo **từng
-request**, nên con có một ngân sách MỚI chứ không phải một nửa ngân sách của
-cha. Còn hạn mức token/phút là tài nguyên chung của cả deployment, và con vẫn
-gọi model qua đúng client của cha nên vẫn trừ vào đó. Uỷ quyền nới cái thứ
-nhất, không nới cái thứ hai.
-
-Có **hai lối** vào cùng tính năng đó. Model tự gọi tool `task` — làm được
-giữa turn, đúng lúc nó vừa nhận ra nên đưa việc đi chỗ khác. Hoặc người dùng gõ
-`/task <agent> <việc>` — chỉ gõ được lúc đang đứng ở prompt, nhưng bù lại không
-phải thuyết phục model rằng nên uỷ quyền, và uỷ quyền được từ một agent không
-hề cầm `task` (`general`, `tutor`). Hai lối dùng chung một `ToolDefinition`
-dựng ở `build_task_tool`, nên phép chặn độ sâu không có đường đi vòng, và cùng
-chung sổ `sub_runs` nên số thứ tự trong `/task N` vẫn liên tục. Lối gõ tay
-**không** ghi gì vào hội thoại của cha: nhét một cặp user/assistant giả vào log
-để "cho model cha biết" là bịa ra đoạn hội thoại chưa từng xảy ra, rồi
-resume/replay sẽ kể lại đúng đoạn bịa đó.
-
-Độ sâu chặn bằng **dữ liệu**, không bằng biến đếm lúc chạy: `LEAD_DELEGATES`
-nói ai được giao việc, và `app.py` kiểm lúc khởi động rằng không ai trong số
-đó cầm `task` — nhìn hai dòng cạnh nhau là biết cây sâu tới đâu. Approver
-truyền thẳng xuống con, không nới ra: uỷ quyền không được là đường leo thang
-quyền. Và `--replay --agent lead` **dừng ngay** chứ không chạy thử: hội thoại
-của con nằm ở log riêng (`run.task-1.jsonl`), còn log đang phát lại chỉ chứa
-đúng câu trả lời cuối của nó.
-
-### Chạy
+## Chạy
 
 ```bash
 python3 -m mini_harness --azure                     # chat mode
@@ -130,18 +66,53 @@ python3 -m mini_harness --azure --agent lead        # giao việc cho sub-agent
 python3 -m pytest -q
 ```
 
-Credential đọc từ `.env` ở gốc repo (không commit):
-`AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_API_VERSION`,
-`AZURE_OPENAI_DEPLOYMENT` — hoặc `DEEPSEEK_API_KEY` cho `--deepseek`.
-`TAVILY_API_KEY` chỉ cần cho agent nào cầm `web_search`; thiếu thì harness
-dừng ngay lúc khởi động chứ không lặng lẽ bỏ tool đi.
+Credential đọc từ `.env` ở gốc repo (không commit): `AZURE_OPENAI_API_KEY`,
+`AZURE_OPENAI_ENDPOINT`, `AZURE_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT` — hoặc
+`DEEPSEEK_API_KEY` cho `--deepseek`. `TAVILY_API_KEY` chỉ cần cho agent nào cầm
+`web_search`; thiếu thì harness **dừng ngay lúc khởi động** chứ không lặng lẽ bỏ
+tool đi.
 
-Trong chat mode: `Ctrl-C` huỷ **turn** đang chạy và giữ session; `Ctrl-C` ở
-prompt trống, `Ctrl-D` hoặc `/quit` để thoát. `/compact` nén ngay, không đợi
-ngưỡng — nó bỏ qua đúng hai thứ (ngưỡng và cầu dao đếm số lần nén hỏng), còn
-vùng giữ nguyên văn thì vẫn giữ. `/context` cho biết còn bao nhiêu chỗ. `/task` liệt kê các lần đã uỷ quyền,
-`/task N` in lại transcript của lần thứ N — đó là cách xem SAU khi con chạy
-xong; lúc nó đang chạy thì từng tool nó gọi đã được in thụt vào. `/task <agent>
-<việc>` thì uỷ quyền ngay, và Ctrl-C huỷ được nó như huỷ một turn. Gõ sai
-tên lệnh thì báo tại chỗ chứ không lặng lẽ gửi cho model — một lệnh gõ nhầm mà
+### Trong chat mode
+
+| | |
+|---|---|
+| `Ctrl-C` | huỷ **turn** đang chạy, giữ session. Ở prompt trống thì thoát |
+| `Ctrl-D`, `/quit` | thoát |
+| `/context` | còn bao nhiêu chỗ: số message, token API đo được, ngân sách |
+| `/compact` | nén ngay, không đợi ngưỡng |
+| `/task` | liệt kê các lần đã uỷ quyền |
+| `/task N` | in lại transcript của lần thứ N |
+| `/task <agent> <việc>` | uỷ quyền ngay — Ctrl-C huỷ được như huỷ một turn |
+
+Gõ sai tên lệnh thì báo tại chỗ chứ không lặng lẽ gửi cho model: một lệnh gõ nhầm
 lọt xuống `run_turn` là một lượt API bị tiêu cho câu hỏi không ai định hỏi.
+
+## Cấu trúc
+
+```
+mini_harness/
+  core/    types.py  loop.py  session.py     # không import implementation nào
+           compaction.py                     # nén khúc đầu bằng summary model viết
+           prompt.py  agent.py               # ráp system prompt; agent = dữ liệu
+  llm/     stream.py  deepseek.py  azure.py  # chỗ duy nhất biết wire format
+           replay.py                         # phát lại log, không gọi API
+  tools/   registry.py  calculator.py  write_file.py  web_search.py
+           read_spill.py                     # đọc / tìm trong khúc đã cắt
+           task.py                           # giao việc cho sub-agent
+  cli/     terminal.py  chat.py              # chỗ duy nhất in ra màn hình
+  context.py                                 # giờ, workspace — chạm thế giới thật
+  profiles.py                                # general, tutor, research, lead
+  app.py                                     # chỗ duy nhất biết tất cả những thứ trên
+tests/                                       # không gọi API thật, chạy được offline
+```
+
+## Đọc tiếp
+
+| | |
+|---|---|
+| [`docs/how-to-learn.md`](docs/how-to-learn.md) | Thứ tự đọc — đừng đọc repo từ đầu đến cuối |
+| [`docs/kien-truc.md`](docs/kien-truc.md) | Kiến trúc `mini_harness`: vì sao nó được xếp như vậy |
+| [`docs/deepseek_harness_cordis_study_notes.md`](docs/deepseek_harness_cordis_study_notes.md) | Ghi chú: Cordis runtime + core packages của deepseek-harness |
+| [`docs/codex_study_notes.md`](docs/codex_study_notes.md) | Ghi chú: Codex nén ngữ cảnh kiểu khác, và vì sao nó không xếp được ba phép cắt |
+| [`docs/claude_code_study_notes.md`](docs/claude_code_study_notes.md) | Ghi chú: Claude Code và phép cắt thứ tư (cắt ở schema tool) |
+| [`docs/bai-tap-replay.md`](docs/bai-tap-replay.md) | Bài tập: tự dựng `ReplayLLM` (đã có lời giải trong repo) |
