@@ -549,8 +549,29 @@ async def test_instruction_di_o_message_CUOI_cung() -> None:
     await maybe_compact(session=session, llm=llm, system="S", tools=[])
 
     messages = llm.requests[0]["messages"]
-    assert messages[-1] == {"role": "user", "content": _INSTRUCTION}
+    assert messages[-1]["content"] == _INSTRUCTION
     assert all(_INSTRUCTION not in m["content"] for m in messages[:-1])
+
+
+@pytest.mark.asyncio
+async def test_instruction_khong_duoc_mang_role_user() -> None:
+    """Role `user` làm model chép chính câu lệnh này vào checkpoint.
+
+    Đo thật: với `role: "user"`, mục Request and Intent sinh ra dòng
+    `- User instructed: "Write a checkpoint that condenses everything
+    above..."` — 4/4 lần. Model không cãi lời; message cuối đúng là một yêu
+    cầu của user theo nghĩa đen của role, mà mục đó dặn ghi verbatim. Vá bằng
+    câu chữ không ăn thua, đổi role thì sạch 4/4.
+
+    Rác này không chỉ xấu: nó còn được MANG THEO qua mỗi lần nén sau, vì
+    checkpoint cũ được gộp vào checkpoint mới.
+    """
+    session = _dong_lon()
+    llm = FakeLLM([AssistantMessage(text="checkpoint")])
+
+    await maybe_compact(session=session, llm=llm, system="S", tools=[])
+
+    assert llm.requests[0]["messages"][-1]["role"] != "user"
 
 
 @pytest.mark.asyncio

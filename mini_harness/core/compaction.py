@@ -25,6 +25,24 @@ from mini_harness.core.types import AssistantMessage, CompactionPlan
 # (như một system prompt riêng) thì mất prefix cache, vì prefix hết ấm ngay từ
 # byte đầu tiên.
 #
+# Và nó mang `role: "system"`, không phải `"user"` — chỗ này sửa một lỗi tìm
+# được bằng chạy thật. Với role `user`, checkpoint sinh ra có dòng:
+#
+#     - User instructed: "Write a checkpoint that condenses everything above..."
+#
+# Model không hề cãi lời: message cuối ĐÚNG là một yêu cầu của user theo đúng
+# nghĩa đen của role, mà mục Request and Intent lại dặn ghi verbatim. Thử vá
+# bằng câu chữ (thêm "trong hội thoại phía trên", thêm một dòng Rules nói rõ
+# message này là lệnh chứ không phải thứ được ghi) thì 1/1 lần vẫn rò. Đổi
+# role thì sạch 4/4, và `developer` cũng sạch 4/4. Chọn `system` vì DeepSeek
+# cũng hiểu, còn `developer` thì không chắc.
+#
+# Bỏ role sang system KHÔNG đụng tới prefix cache: cache khớp theo PREFIX, mà
+# toàn bộ phần phía trước message cuối vẫn y nguyên.
+#
+# Đo lại sau khi đổi role: hai dòng vá bằng câu chữ ở trên thành thừa (sạch
+# 3/3 cả khi có lẫn khi không), nên không giữ. Sửa đúng một chỗ là đủ.
+#
 # Model-facing nên viết tiếng Anh. Mục chia sẵn chứ không để model tự nghĩ bố
 # cục: bản tóm tắt này sẽ bị tóm tắt tiếp ở lần nén sau, và một cấu trúc cố
 # định thì gộp được, còn văn xuôi tự do thì mỗi lần gộp lại rụng một ít.
@@ -44,6 +62,7 @@ from mini_harness.core.types import AssistantMessage, CompactionPlan
 # phải một lượt trả lời. Hiệu quả y hệt mà không phải nhờ model giấu gì cả.
 # Còn việc "đừng nhắc tới checkpoint" thì thuộc về phía model ĐỌC, và nó đã
 # nằm sẵn trong `_CHECKPOINT_PREAMBLE` của session.py — đúng chỗ của nó.
+
 _INSTRUCTION = """\
 Write a checkpoint that condenses everything above, so the conversation can \
 continue after the original messages are dropped. Use exactly these sections:
@@ -152,7 +171,7 @@ async def maybe_compact(
     try:
         reply = await llm.generate(
             system=system,
-            messages=[*plan.messages, {"role": "user", "content": _INSTRUCTION}],
+            messages=[*plan.messages, {"role": "system", "content": _INSTRUCTION}],
             tools=tools,
         )
     except Exception as error:  # noqa: BLE001 - lỗi nào cũng phải rơi về lưới
