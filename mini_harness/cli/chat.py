@@ -49,6 +49,12 @@ def echo_tool_activity(
         display.close()
         for call in event.get("tool_calls", ()):
             print(f"{prefix}  → {call['name']}({call['arguments']})")
+        if event["type"] == "retry":
+            # Thông báo đi đường EVENT chứ không đường text. `on_text` chảy
+            # thẳng vào `StreamAccumulator`, nên một dòng "đang thử lại" gửi
+            # qua đó sẽ thành lời của chính model ở lượt sau.
+            print(f"{prefix}  ↻ thử lại lần {event['attempt']} sau "
+                  f"{event['delay_ms']}ms ({event['error']})")
         if event["type"] == "tool_result":
             # Một dòng đầu là đủ để biết chạy được hay không; nội dung đầy đủ
             # nằm trong log. Đây là chỗ duy nhất `is_error` được dùng để
@@ -64,7 +70,7 @@ def print_log(session: Session) -> None:
     print("\n--- session.events (log thô) ---")
     for index, event in enumerate(session.events):
         mark = " [ERROR]" if event.get("is_error") else ""
-        detail = event.get("content") or event.get("name") or ""
+        detail = event.get("content") or event.get("name") or event.get("error") or ""
         if event.get("tool_calls"):
             detail = f"{detail} -> " + ", ".join(
                 f"{call['name']}({call['arguments']})" for call in event["tool_calls"]

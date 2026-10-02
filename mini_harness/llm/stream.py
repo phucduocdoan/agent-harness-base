@@ -9,10 +9,17 @@ Thêm provider thứ ba = thêm một file cạnh file này, không sửa gì �
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from mini_harness.core.types import AssistantMessage, ToolCall
+from mini_harness.core.types import (
+    AssistantMessage,
+    StreamCancelled,
+    StreamInterrupted,
+    ToolCall,
+)
+from mini_harness.llm.retry import OnRetry, with_retry
 
 
 def to_wire_tools(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -78,6 +85,17 @@ class StreamAccumulator:
                     if function.arguments:
                         slot["arguments"] += function.arguments
 
+    @property
+    def text(self) -> str:
+        """Phần text ĐÃ đi qua `on_text`, tức đã nằm trên màn hình người dùng.
+
+        Đọc được cả khi stream chưa kết thúc — và đó là lý do nó tồn tại: lúc
+        stream vỡ thì `finish()` không còn nghĩa (message đó không hoàn chỉnh,
+        không ai được dùng nó như một lượt trả lời), nhưng câu hỏi "người dùng
+        đã đọc tới đâu" thì vẫn phải trả lời được.
+        """
+        return "".join(self._text)
+
     def finish(self) -> AssistantMessage:
         """Chốt stream thành message.
 
@@ -102,23 +120,73 @@ async def generate_streamed(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     on_text: OnText | None,
+    on_retry: OnRetry | None = None,
 ) -> AssistantMessage:
-    """Một model call ở chế độ stream. Dùng chung cho mọi provider OpenAI-wire."""
-    accumulator = StreamAccumulator(on_text)
-    stream = await client.chat.completions.create(
-        model=model,
-        messages=[{"role": "system", "content": system}, *messages],
-        stream=True,
-        # Xin API báo lại số token nó THẬT SỰ đọc. Ở chế độ stream phải xin
-        # tường minh, vì mặc định stream không trả usage. Số này là cái neo
-        # duy nhất để sửa sai số của bộ đoán ở tầng trên; xem
-        # `Session._calibrate`.
-        stream_options={"include_usage": True},
-        # Gửi `tools=[]` là lỗi ở một số provider; không có tool thì bỏ hẳn key.
-        **({"tools": to_wire_tools(tools)} if tools else {}),
+    """Một model call ở chế độ stream. Dùng chung cho mọi provider OpenAI-wire.
+
+    Thử lại nằm ở ĐÂY, bọc quanh một lần gọi, chứ không ở `core/loop.py` bọc
+    quanh cả turn. Một turn đã chạy tool thì chạy lại là chạy lại cả tool —
+    ghi file hai lần, gửi request hai lần. Còn một lần `create()` hỏng trước
+    token đầu thì chưa để lại dấu vết nào ở bất cứ đâu. Thử lại chỉ an toàn ở
+    mức nhỏ nhất đó.
+
+    `lambda` chứ không phải coroutine dựng sẵn: mỗi lần thử phải là một
+    `StreamAccumulator` mới tinh. Dùng lại accumulator cũ là nối text của lần
+    hỏng vào text của lần thành công.
+    """
+    return await with_retry(
+        lambda: _one_attempt(
+            client, model, system=system, messages=messages, tools=tools, on_text=on_text
+        ),
+        on_retry=on_retry,
     )
-    # `async with` để Ctrl-B giữa stream đóng hẳn connection thay vì bỏ treo.
-    async with stream as events:
-        async for chunk in events:
-            accumulator.feed(chunk)
+
+
+async def _one_attempt(
+    client: Any,
+    model: str,
+    *,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    on_text: OnText | None,
+) -> AssistantMessage:
+    """Đúng một lần gửi request và gộp stream về.
+
+    Hai `except` ở cuối là chỗ hàm này trả lời một câu mà không ai khác trả lời
+    được: **đã có chữ nào ra màn hình chưa.** Chỉ accumulator biết, vì chỉ nó
+    cầm `on_text`. Và câu trả lời đó quyết định hai thứ ở hai tầng khác nhau:
+    `with_retry` có được thử lại không, và `run_turn` có phải ghi lại đoạn text
+    mồ côi không. Cả hai đọc nó qua KIỂU exception, không qua cờ.
+
+    Chưa phát chữ nào thì ném lại nguyên exception gốc, không bọc: lúc đó
+    không có gì mồ côi để mang theo, mà `APIConnectionError` hiện nguyên tên
+    của nó ở màn hình người dùng vẫn dễ hiểu hơn một lớp bọc của bản này.
+    """
+    accumulator = StreamAccumulator(on_text)
+    try:
+        stream = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system}, *messages],
+            stream=True,
+            # Xin API báo lại số token nó THẬT SỰ đọc. Ở chế độ stream phải xin
+            # tường minh, vì mặc định stream không trả usage. Số này là cái neo
+            # duy nhất để sửa sai số của bộ đoán ở tầng trên; xem
+            # `Session._calibrate`.
+            stream_options={"include_usage": True},
+            # Gửi `tools=[]` là lỗi ở một số provider; không có tool thì bỏ hẳn key.
+            **({"tools": to_wire_tools(tools)} if tools else {}),
+        )
+        # `async with` để Ctrl-B giữa stream đóng hẳn connection thay vì bỏ treo.
+        async with stream as events:
+            async for chunk in events:
+                accumulator.feed(chunk)
+    except asyncio.CancelledError:
+        if accumulator.text:
+            raise StreamCancelled(accumulator.text) from None
+        raise
+    except Exception as error:
+        if accumulator.text:
+            raise StreamInterrupted(accumulator.text, error) from error
+        raise
     return accumulator.finish()

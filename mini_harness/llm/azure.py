@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from mini_harness.core.types import AssistantMessage
+from mini_harness.llm.retry import OnRetry
 from mini_harness.llm.stream import OnText, generate_streamed
 
 
@@ -27,6 +28,7 @@ class AzureLLM:
         endpoint: str | None = None,
         api_version: str | None = None,
         on_text: OnText | None = None,
+        on_retry: OnRetry | None = None,
     ) -> None:
         from openai import AsyncAzureOpenAI
 
@@ -44,6 +46,7 @@ class AzureLLM:
             raise RuntimeError(f"thiếu {', '.join(missing)}")
         self._deployment = name
         self._on_text = on_text
+        self._on_retry = on_retry
         self._client = AsyncAzureOpenAI(api_key=key, azure_endpoint=url, api_version=version)
 
     async def generate(
@@ -56,4 +59,5 @@ class AzureLLM:
         return await generate_streamed(
             self._client, self._deployment,
             system=system, messages=messages, tools=tools, on_text=self._on_text,
+            on_retry=self._on_retry,
         )

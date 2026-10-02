@@ -48,6 +48,9 @@ Vì sao xếp như vậy, và chỗ nào thì khác Codex / Claude Code:
   riêng; cha chỉ nhận lại đúng đoạn text cuối. Model tự gọi, hoặc người dùng gõ
   `/task <agent> <việc>`.
 - **Log bền**: `--session` ghi/resume, `--replay` phát lại log cũ không cần API key.
+- **Lỗi mạng**: thử lại chỉ *trước* token đầu — sau đó chữ đã nằm trên màn hình
+  người dùng, không rút lại được. Stream vỡ giữa chừng để lại đúng phần đã in
+  trong log, nên replay không phát ra một hội thoại khác cái vừa xem.
 - **Tool registry**: JSON Schema validate trước khi chạy, cổng xin phép, và mọi
   lỗi thành kết quả model đọc được chứ không thành exception.
 - **Bốn agent** sẵn có: `general`, `tutor` (cố tình không có tool), `research`,
@@ -95,6 +98,7 @@ mini_harness/
            compaction.py                     # nén khúc đầu bằng summary model viết
            prompt.py  agent.py               # ráp system prompt; agent = dữ liệu
   llm/     stream.py  deepseek.py  azure.py  # chỗ duy nhất biết wire format
+           retry.py                          # thử lại, nhưng chỉ trước token đầu
            replay.py                         # phát lại log, không gọi API
   tools/   registry.py  calculator.py  write_file.py  web_search.py
            read_spill.py                     # đọc / tìm trong khúc đã cắt
@@ -115,4 +119,5 @@ tests/                                       # không gọi API thật, chạy �
 | [`docs/deepseek_harness_cordis_study_notes.md`](docs/deepseek_harness_cordis_study_notes.md) | Ghi chú: Cordis runtime + core packages của deepseek-harness |
 | [`docs/codex_study_notes.md`](docs/codex_study_notes.md) | Ghi chú: Codex nén ngữ cảnh kiểu khác, và vì sao nó không xếp được ba phép cắt |
 | [`docs/claude_code_study_notes.md`](docs/claude_code_study_notes.md) | Ghi chú: Claude Code và phép cắt thứ tư (cắt ở schema tool) |
+| [`docs/deepseek_harness_retry_study_notes.md`](docs/deepseek_harness_retry_study_notes.md) | Ghi chú: deepseek-harness thử lại và vá stream vỡ thế nào, và chỗ nào mini_harness cố ý làm khác |
 | [`docs/bai-tap-replay.md`](docs/bai-tap-replay.md) | Bài tập: tự dựng `ReplayLLM` (đã có lời giải trong repo) |

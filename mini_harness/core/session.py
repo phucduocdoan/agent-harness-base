@@ -12,6 +12,7 @@ history mà không mất dữ liệu gốc.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,13 +94,8 @@ class Session:
         "Abort records synthetic error results for skipped calls so replay
         stays valid."
         """
-        events = [
-            json.loads(line)
-            for line in log_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
         session = cls(
-            events=events,
+            events=cls._read_log(log_path),
             log_path=log_path,
             max_tokens=max_tokens,
             max_tool_result_chars=max_tool_result_chars,
@@ -107,6 +103,44 @@ class Session:
         session._recalibrate()
         session.abort_pending_tool_calls()
         return session
+
+    @staticmethod
+    def _read_log(log_path: Path) -> list[dict[str, Any]]:
+        """Đọc log JSONL, chịu được đúng MỘT kiểu hỏng: dòng cuối viết dở.
+
+        Ký tự xuống dòng là DẤU COMMIT của một event. `append` ghi JSON và
+        "\n" trong cùng một lần `write`, nên một file không kết thúc bằng
+        "\n" là file bị cắt giữa lần ghi cuối cùng — event đó chưa bao giờ
+        commit, bỏ đi là đúng. Lấy newline làm mốc thay vì thử parse đuôi rồi
+        đoán: một quy tắc, không có trường hợp mập mờ nào phải xử.
+
+        Và phải cắt luôn phần đuôi đó khỏi ĐĨA, không chỉ bỏ lúc đọc. `append`
+        mở file ở chế độ "a" rồi ghi tiếp từ cuối file; để rác lại thì event kế
+        tiếp dính vào đuôi nó thành một dòng không ai parse nổi, và lúc đó một
+        cú kill không đúng lúc hỏng cả log chứ không chỉ hỏng một event.
+
+        Đọc dạng BYTES chứ không phải text: chỗ bị cắt có thể rơi vào giữa một
+        ký tự UTF-8, mà log này toàn tiếng Việt — `read_text` sẽ nổ ngay ở
+        dòng đọc, trước khi kịp tới phần sửa chữa.
+
+        Mọi dòng hỏng KHÁC thì nổ, và nổ kèm số dòng. Dòng giữa hỏng nghĩa là
+        có thứ khác đã phá log; bỏ qua nó là lặng lẽ xoá một lượt khỏi giữa
+        hội thoại, và cái model nhận được sau đó là một câu hỏi không ai trả
+        lời, hoặc một tool_result không có call nào.
+        """
+        raw = log_path.read_bytes()
+        committed, newline, tail = raw.rpartition(b"\n")
+        if tail:
+            os.truncate(log_path, len(committed) + len(newline))
+        events: list[dict[str, Any]] = []
+        for number, line in enumerate(committed.splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError as error:
+                raise ValueError(f"log hỏng ở dòng {number}: {error}") from error
+        return events
 
     def abort_pending_tool_calls(self) -> int:
         """Ghi result giả cho mọi tool_call còn treo. Trả về số call đã vá.
@@ -497,7 +531,7 @@ class Session:
                     "tool_call_id": event["call_id"],
                     "content": event["content"],
                 })
-            elif kind in ("agent", "compaction_failed"):
+            elif kind in ("agent", "compaction_failed", "assistant_attempt", "retry"):
                 # Event METADATA: ghi vào log nhưng KHÔNG gửi cho model. Nó trả
                 # lời câu "log này chạy bằng persona nào" — câu mà resume và
                 # replay cần, còn model thì không (persona đã nằm sẵn trong
@@ -509,6 +543,22 @@ class Session:
                 # Harness thật có cả một họ như vậy: turn/start, step/start,
                 # compaction/*. Nhóm này là lý do `to_messages()` phải là phép
                 # CHIẾU có chọn lọc chứ không phải phép đổi dạng 1-1.
+                #
+                # `assistant_attempt` vào nhóm này tuy nó CHÍNH LÀ text của
+                # model: một lượt stream bị provider cắt ngang giữa chừng.
+                # Log phải giữ, vì người dùng đã đọc đoạn đó rồi và một log
+                # nói khác đi là một log nói dối. Nhưng model thì không được
+                # nhận lại, vì nó sẽ đọc câu cụt của chính mình như một câu
+                # đang viết dở và viết tiếp từ chỗ đứt — trong khi việc đúng
+                # là trả lời lại từ đầu. Đây là chỗ hai vai của Session tách
+                # hẳn ra: bản ghi trung thực, và cái model được thấy.
+                # Đối chiếu: SURFACE_EVENT_TYPES ở validation.ts:22 — nó có
+                # `assistant/message` mà không có `assistant/attempt`.
+                #
+                # `retry` thì hiển nhiên hơn: harness chờ 2 giây rồi gửi lại
+                # là chuyện của harness. Nó vào log vì phần CHỜ là phần dễ bị
+                # cắt ngang nhất, và một log im lặng ở đó không giải thích
+                # được vì sao turn đứng yên.
                 continue
             else:
                 raise ValueError(f"event type không biết: {kind!r}")

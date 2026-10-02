@@ -197,3 +197,46 @@ def test_abort_repair_also_reaches_the_listener() -> None:
     session.on_event = lambda event: seen.append(event["content"])
     assert session.abort_pending_tool_calls() == 1
     assert seen == [ABORTED_BEFORE_DISPATCH]
+
+
+def test_resume_drops_a_truncated_last_line_and_heals_the_file(tmp_path: Path) -> None:
+    """Dòng CUỐI viết dở: bỏ nó, và cắt luôn phần thừa trên đĩa.
+
+    Bỏ không thôi là chưa đủ, và đây mới là chỗ dễ sót: `append` mở file ở chế
+    độ "a" rồi ghi tiếp từ cuối file, nên nếu rác còn nằm đó thì event kế tiếp
+    sẽ dính vào đuôi nó thành một dòng không parse nổi. Một lần kill không
+    đúng lúc khi đó hỏng log vĩnh viễn chứ không chỉ hỏng một event.
+    """
+    log = tmp_path / "session.jsonl"
+    session = Session(log_path=log)
+    session.append({"type": "user", "content": "chào"})
+    session.append({"type": "assistant", "content": "chào bạn", "tool_calls": []})
+    # Process chết GIỮA lúc ghi event thứ ba: dòng cuối không có "\n".
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write('{"type": "user", "cont')
+
+    resumed = Session.resume(log)
+
+    assert [event["type"] for event in resumed.events] == ["user", "assistant"]
+    resumed.append({"type": "user", "content": "tiếp"})
+    assert [json.loads(line)["type"] for line in
+            log.read_text(encoding="utf-8").splitlines()] == ["user", "assistant", "user"]
+
+
+def test_resume_refuses_a_broken_line_in_the_middle(tmp_path: Path) -> None:
+    """Dòng hỏng ở GIỮA thì phải nổ, không được lặng lẽ bỏ qua.
+
+    Khác hẳn dòng cuối: dòng cuối cụt là một event chưa kịp commit, bỏ đi là
+    đúng. Dòng giữa hỏng nghĩa là có thứ khác đã phá log — bỏ qua nó là lặng
+    lẽ xoá một lượt khỏi giữa hội thoại, và cái model nhận được sau đó sẽ là
+    một câu hỏi không ai trả lời, hoặc một tool_result không có call nào.
+    """
+    log = tmp_path / "session.jsonl"
+    log.write_text(
+        '{"type": "user", "content": "chào"}\n'
+        '{"type": "assist\n'
+        '{"type": "assistant", "content": "chào bạn", "tool_calls": []}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="dòng 2"):
+        Session.resume(log)

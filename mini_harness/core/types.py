@@ -10,6 +10,7 @@ import lại bao giờ (Protocol là structural typing), nên chúng thuộc v�
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,3 +79,49 @@ class CompactionPlan:
     # Số event ở ĐẦU log mà bản tóm tắt sẽ đứng thay.
     covers: int
     messages: list[dict[str, Any]]
+
+
+# ------------------------------------------------- stream vỡ giữa chừng
+# Hai lối thoát bất thường của một lần `generate()` đang stream. Cả hai mang
+# theo ĐÚNG phần text đã đi qua `on_text` — tức đã nằm trên màn hình người
+# dùng. Không mang theo là mất: loop không có đường nào khác để biết, vì nó
+# không sở hữu kênh hiển thị và cũng không biết provider có stream hay không.
+#
+# `tool_calls` gom dở thì KHÔNG mang theo, cố ý. Một tool call chỉ có nghĩa khi
+# nó chạy xong và có result; giữ lại một call không bao giờ được dispatch là tự
+# tay làm log hỏng, và vá nó đòi phải bịa ra một result không có thật.
+# Đối chiếu: assembler.ts:165 — "Tool calls are omitted because interruption
+# precedes dispatch; retaining one would require a fabricated result."
+#
+# Vì sao HAI class chứ không phải một class với field `cause`: chúng khác nhau
+# ở chỗ không gộp được — `StreamCancelled` phải là `CancelledError` để mọi
+# `except asyncio.CancelledError` sẵn có (chat, task, registry) vẫn đúng, còn
+# `StreamInterrupted` thì tuyệt đối không được, nếu không một lỗi mạng sẽ giả
+# dạng thành người dùng bấm Ctrl-C.
+
+
+class StreamInterrupted(Exception):
+    """Provider chết giữa stream (429, timeout, connection reset...).
+
+    `text` là phần người dùng ĐÃ đọc. Nó vào log, nhưng KHÔNG chiếu cho model:
+    đây là một lượt hỏng, và một câu cụt lửng của chính nó trong history là thứ
+    model sẽ cố nối tiếp thay vì trả lời lại.
+    """
+
+    def __init__(self, text: str, cause: BaseException) -> None:
+        super().__init__(f"stream vỡ sau {len(text)} ký tự: {cause}")
+        self.text = text
+        self.cause = cause
+
+
+class StreamCancelled(asyncio.CancelledError):
+    """Người dùng huỷ giữa stream (Ctrl-C).
+
+    `text` là phần người dùng ĐÃ đọc. Nó vào log VÀ được chiếu cho model, khác
+    hẳn `StreamInterrupted`: ở đây không có gì hỏng cả, người dùng chủ động cắt
+    và vẫn nhìn thấy đoạn dở đó — câu kế tiếp của họ rất có thể nói về nó.
+    """
+
+    def __init__(self, text: str) -> None:
+        super().__init__(f"huỷ sau {len(text)} ký tự")
+        self.text = text

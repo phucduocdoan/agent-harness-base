@@ -13,7 +13,12 @@ import asyncio
 from typing import Any, Protocol
 
 from mini_harness.core.compaction import CompactionSession, Summarizer, maybe_compact
-from mini_harness.core.types import AssistantMessage, ToolResult
+from mini_harness.core.types import (
+    AssistantMessage,
+    StreamCancelled,
+    StreamInterrupted,
+    ToolResult,
+)
 
 # ------------------------------------------------------------------- protocols
 # Contract loop cần. Ba file kia implement, không cần import ngược lại chỗ này
@@ -143,11 +148,40 @@ async def run_turn(
         await maybe_compact(session=session, llm=summarizer or llm,
                             system=system, tools=tools.schemas())
 
-        reply = await llm.generate(
-            system=system,
-            messages=session.to_messages(),
-            tools=tools.schemas(),
-        )
+        # Stream có thể vỡ SAU khi vài chữ đã lên màn hình: `on_text` đẩy
+        # từng mảnh ra terminal ngay lúc nó tới, còn event `assistant` dưới
+        # kia chỉ được ghi khi `generate()` đã trả về trọn vẹn. Để exception
+        # bay thẳng lên là để người dùng đọc một đoạn text không tồn tại ở
+        # bất cứ đâu — và `--replay` sau đó phát lại một hội thoại khác với
+        # hội thoại họ vừa xem. Ghi trước, rồi mới cho bay.
+        #
+        # Hai nhánh KHÔNG gộp được, dù text y hệt nhau. Chúng khác ở chỗ quan
+        # trọng nhất: `assistant` thì model đọc lại được, `assistant_attempt`
+        # thì không. Chia theo NGUYÊN NHÂN, không theo nội dung — xem
+        # core/types.py. Đối chiếu: agent.ts:386 vs agent.ts:428.
+        try:
+            reply = await llm.generate(
+                system=system,
+                messages=session.to_messages(),
+                tools=tools.schemas(),
+            )
+        except StreamCancelled as cancelled:
+            # Chưa chữ nào ra màn hình thì không có gì để ghi. Đây là trường
+            # hợp thường gặp nhất (huỷ lúc còn đang chờ token đầu), và ghi một
+            # event rỗng vào đó chỉ làm log bẩn.
+            if cancelled.text:
+                session.append({
+                    "type": "assistant",
+                    "content": cancelled.text,
+                    "tool_calls": [],
+                    # Để log không khai man rằng model đã nói xong câu đó.
+                    "interrupted": True,
+                })
+            raise
+        except StreamInterrupted as broken:
+            if broken.text:
+                session.append({"type": "assistant_attempt", "content": broken.text})
+            raise
         session.append({
             "type": "assistant",
             "content": reply.text,

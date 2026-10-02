@@ -328,32 +328,6 @@ async def main() -> int:
 
     # Không truyền câu hỏi -> chat mode.
     question: str | None = rest[0] if rest else None
-    display = TerminalStream()
-    try:
-        llm: Any = (
-            ReplayLLM(replay_path, on_text=display)
-            if replay_path is not None
-            else PROVIDERS[flags[0]](on_text=display)
-        )
-        # Provider THỨ HAI, cùng model cùng cấu hình, chỉ khác: KHÔNG có
-        # `on_text`. Dùng cho phép nén.
-        #
-        # Vì sao phải là object khác chứ không phải một cờ: `on_text` gắn vào
-        # provider lúc dựng, nên "có hiển thị hay không" là thuộc tính của cái
-        # object, không phải của từng lần gọi. Mà bản tóm tắt thì không phải
-        # lượt trả lời của model — nó là bookkeeping nội bộ của harness. Dùng
-        # chung một object là đổ nguyên checkpoint ra terminal, và ở đường tự
-        # động nó còn chen vào GIỮA câu trả lời đang stream. Lỗi này chỉ lộ ra
-        # khi chạy thật, vì fake không có kênh hiển thị nào để mà rò.
-        #
-        # `--replay` không cần: ở đó ngân sách là None nên phép nén không chạy.
-        summarizer: Any = (
-            None if replay_path is not None else PROVIDERS[flags[0]]()
-        )
-    except RuntimeError as error:
-        print(f"không dựng được provider: {error}", file=sys.stderr)
-        return 1
-
     # Ngân sách truyền lúc DỰNG, cho cả ba nhánh: `resume` phải biết chính
     # sách cắt ngay lúc nó học lại phép neo từ log. Gán sau là để session tồn
     # tại một khoảnh khắc ở trạng thái nửa cấu hình, và `resume` rơi đúng vào
@@ -381,6 +355,48 @@ async def main() -> int:
         print(f"(resume {len(session.events)} event từ {session_path})")
     else:
         session = Session(log_path=session_path, **budget)
+
+    display = TerminalStream()
+    try:
+        # `on_retry=session.append` — và vì thế session phải dựng xong TRƯỚC
+        # provider, khác thứ tự cũ. Một lần thử lại là một event vào log, rồi
+        # `Session.on_event` lo phần hiện lên màn hình: cùng một đường mà tool
+        # call đang đi. Nối thẳng vào `display` cũng hiện ra y hệt, nhưng khi
+        # đó bằng chứng chỉ sống trong scrollback của terminal — `--replay`
+        # một log như vậy sẽ không giải thích nổi mười giây đứng yên.
+        #
+        # `ReplayLLM` không nhận: nó không gọi mạng nên không có gì để thử lại.
+        llm: Any = (
+            ReplayLLM(replay_path, on_text=display)
+            if replay_path is not None
+            else PROVIDERS[flags[0]](on_text=display, on_retry=session.append)
+        )
+        # Provider THỨ HAI, cùng model cùng cấu hình, chỉ khác: KHÔNG có
+        # `on_text`. Dùng cho phép nén.
+        #
+        # Vì sao phải là object khác chứ không phải một cờ: `on_text` gắn vào
+        # provider lúc dựng, nên "có hiển thị hay không" là thuộc tính của cái
+        # object, không phải của từng lần gọi. Mà bản tóm tắt thì không phải
+        # lượt trả lời của model — nó là bookkeeping nội bộ của harness. Dùng
+        # chung một object là đổ nguyên checkpoint ra terminal, và ở đường tự
+        # động nó còn chen vào GIỮA câu trả lời đang stream. Lỗi này chỉ lộ ra
+        # khi chạy thật, vì fake không có kênh hiển thị nào để mà rò.
+        #
+        # `--replay` không cần: ở đó ngân sách là None nên phép nén không chạy.
+        #
+        # Nó CÓ `on_retry`: phép nén cũng là một request thật, và một lần nén
+        # bị 429 cũng làm turn đứng yên y như lượt hội thoại. Cái giá phải nói
+        # rõ: object này còn được dùng làm model cho sub-agent (`build_spawn`),
+        # nên một lần thử lại bên trong sub-agent sẽ rơi vào log của CHA chứ
+        # không phải log của con. Chấp nhận được, vì log cha đúng là cái người
+        # dùng đang nhìn; và log con nhờ vậy vẫn chỉ chứa hội thoại.
+        summarizer: Any = (
+            None if replay_path is not None
+            else PROVIDERS[flags[0]](on_retry=session.append)
+        )
+    except RuntimeError as error:
+        print(f"không dựng được provider: {error}", file=sys.stderr)
+        return 1
 
     # Ghi agent vào log, một lần cho mỗi session. Không ghi thì `--resume` và
     # `--replay` sẽ dựng lại hội thoại cũ bằng persona HIỆN TẠI — replay vừa

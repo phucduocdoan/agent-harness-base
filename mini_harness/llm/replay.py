@@ -8,11 +8,14 @@ event chứ không lưu message list.
 snapshot-test LLM replay" — dựng kịch bản model call từ session log rồi gắn vào
 một phiên mới).
 
-Giới hạn cần biết trước khi tin nó: log chỉ ghi những gì ĐÃ xảy ra. Một request
-từng timeout hay từng treo không để lại event nào, nên replay thuần từ log không
-bao giờ dựng lại được đường lỗi. Harness thật giải bằng file override riêng —
-"Throw and hang cases require an explicit override because a session log cannot
-reconstruct them alone."
+Giới hạn cần biết trước khi tin nó: log chỉ ghi những gì ĐÃ xảy ra, và replay
+chỉ đọc event `assistant`. Lỗi có để lại dấu — `retry` khi còn thử lại được,
+`assistant_attempt` khi stream vỡ sau chữ đầu — nhưng dấu vết không phải kịch
+bản: chúng nói request này đã hỏng, không nói hỏng ở byte nào, nên replay bỏ qua
+cả hai và phát lại hội thoại như thể mọi request đều trôi chảy. Còn một request
+vỡ TRƯỚC chữ đầu thì đúng là không để lại gì thật, vì nó được thử lại âm thầm.
+Harness thật giải bằng file override riêng — "Throw and hang cases require an
+explicit override because a session log cannot reconstruct them alone."
 """
 
 from __future__ import annotations

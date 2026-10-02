@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from mini_harness.core.types import AssistantMessage
+from mini_harness.llm.retry import OnRetry
 from mini_harness.llm.stream import OnText, generate_streamed
 
 
@@ -21,6 +22,7 @@ class DeepSeekLLM:
         model: str = "deepseek-chat",
         api_key: str | None = None,
         on_text: OnText | None = None,
+        on_retry: OnRetry | None = None,
     ) -> None:
         from openai import AsyncOpenAI  # import trong hàm: chạy provider khác thì không cần openai
 
@@ -29,6 +31,7 @@ class DeepSeekLLM:
             raise RuntimeError("thiếu DEEPSEEK_API_KEY")
         self._model = model
         self._on_text = on_text
+        self._on_retry = on_retry
         self._client = AsyncOpenAI(api_key=key, base_url="https://api.deepseek.com")
 
     async def generate(
@@ -41,4 +44,5 @@ class DeepSeekLLM:
         return await generate_streamed(
             self._client, self._model,
             system=system, messages=messages, tools=tools, on_text=self._on_text,
+            on_retry=self._on_retry,
         )
