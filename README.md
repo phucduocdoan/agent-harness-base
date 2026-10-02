@@ -91,4 +91,6 @@ Credential đọc từ `.env` ở gốc repo (không commit):
 dừng ngay lúc khởi động chứ không lặng lẽ bỏ tool đi.
 
 Trong chat mode: `Ctrl-C` huỷ **turn** đang chạy và giữ session; `Ctrl-C` ở
-prompt trống, `Ctrl-D` hoặc `/quit` để thoát.
+prompt trống, `Ctrl-D` hoặc `/quit` để thoát. `/compact` nén ngay, không đợi
+ngưỡng — nó bỏ qua đúng hai thứ (ngưỡng và cầu dao đếm số lần nén hỏng), còn
+vùng giữ nguyên văn thì vẫn giữ.

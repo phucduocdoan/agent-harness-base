@@ -309,7 +309,7 @@ class Session:
     # Đối chiếu Claude Code 2.1.76: "stops retrying after 3 failed attempts".
     _COMPACTION_MAX_FAILURES = 3
 
-    def plan_compaction(self) -> CompactionPlan | None:
+    def plan_compaction(self, *, force: bool = False) -> CompactionPlan | None:
         """Có cần nén không, và nếu có thì nén tới đâu — trả `None` nếu chưa cần.
 
         Session trả lời câu này chứ không phải `core/compaction.py`, vì trả lời
@@ -328,12 +328,25 @@ class Session:
         đỡ, chỉ là từ đó trở đi mỗi lượt rụng một turn cũ thay vì được tóm tắt
         lại. Đó là xuống cấp có kiểm soát, và nó hiện ra trong log qua chuỗi
         event `compaction_failed`.
+
+        `force` là `/compact` gõ tay. Nó bỏ qua ĐÚNG hai thứ: ngưỡng và cầu
+        dao — cả hai đều chỉ tồn tại để quyết định khi nào tự nén, mà người
+        dùng đã tự quyết định hộ rồi. Mọi thứ còn lại giữ nguyên: vẫn giữ
+        `retain` turn cuối nguyên văn, và vẫn trả `None` khi không còn gì mới
+        để nén. Cho `force` phá nốt mấy chốt đó là biến một lệnh thành một cái
+        bẫy — nén mất chính câu hỏi đang chạy, hoặc trả tiền model để tóm tắt
+        lại bản tóm tắt vừa viết.
+
+        Không có `max_tokens` thì `force` cũng chịu: `retain` tính theo ngân
+        sách, không có ngân sách thì không biết giữ lại bao nhiêu.
         """
         if self.max_tokens is None:
             return None
-        if self._failures_since_compaction() >= self._COMPACTION_MAX_FAILURES:
+        if not force and (
+            self._failures_since_compaction() >= self._COMPACTION_MAX_FAILURES
+        ):
             return None
-        if self._estimate(self._pruned(self._compacted(self.events))) <= (
+        if not force and self._estimate(self._pruned(self._compacted(self.events))) <= (
             self.max_tokens * self._COMPACTION_THRESHOLD
         ):
             return None

@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mini_harness.cli.terminal import TerminalStream, read_line as _default_read_line
+from mini_harness.core.compaction import maybe_compact
 from mini_harness.core.loop import MaxStepsExceeded, run_turn
 from mini_harness.core.session import Session
 
@@ -62,6 +63,42 @@ def print_log(session: Session) -> None:
     ]
     do_duoc = f", request cuối {measured[-1]} token (API đo)" if measured else ""
     print(f"\n--- to_messages() gửi model: {len(session.to_messages())} message{do_duoc} ---")
+
+
+async def _compact_now(
+    *,
+    llm: Any,
+    tools: Any,
+    session: Session,
+    system: str,
+) -> None:
+    """`/compact`: nén ngay, không đợi ngưỡng. In ra kết quả.
+
+    Đường tự động nén GIỮA turn, ở mỗi step, vì tool result là nguồn phình
+    nhanh nhất. Lệnh gõ tay thì ngược lại: nó chỉ gõ được lúc đang đứng ở
+    prompt, tức là không có turn nào đang chạy để phải huỷ trước. Codex phải
+    huỷ turn đang chạy rồi mới nén vì ở đó `/compact` gửi được giữa chừng.
+
+    In ra số message trước/sau chứ không chỉ "đã nén": người gõ lệnh này đang
+    hỏi "còn bao nhiêu chỗ", và một câu "xong" không trả lời được câu đó.
+    """
+    if session.max_tokens is None:
+        print("(không nén được: session không có ngân sách token, "
+              "mà vùng giữ nguyên văn tính theo ngân sách)")
+        return
+
+    truoc = len(session.to_messages())
+    if await maybe_compact(session=session, llm=llm, system=system,
+                           tools=tools.schemas(), force=True):
+        print(f"(đã nén: {truoc} → {len(session.to_messages())} message)")
+        return
+
+    # Hỏng thì lý do đã nằm trong log — đọc ra chứ không đoán lại. Không có
+    # event nào mới nghĩa là Session nói "không còn gì để nén", chưa gọi model.
+    cuoi = session.events[-1] if session.events else {}
+    ly_do = (cuoi["content"] if cuoi.get("type") == "compaction_failed"
+             else "không còn turn cũ nào để nén")
+    print(f"(không nén được: {ly_do})")
 
 
 async def chat(
@@ -120,6 +157,19 @@ async def chat(
             if question in {"/quit", "/exit"}:
                 return 0
             if not question:
+                continue
+            if question == "/compact":
+                # Dùng lại y nguyên cơ chế huỷ của turn: /compact cũng gọi
+                # model, nên nó cũng phải Ctrl-C được.
+                current = asyncio.create_task(_compact_now(
+                    llm=llm, tools=tools, session=session, system=system,
+                ))
+                try:
+                    await current
+                except asyncio.CancelledError:
+                    print("(đã huỷ /compact — session vẫn giữ)")
+                finally:
+                    current = None
                 continue
 
             current = asyncio.create_task(run_turn(

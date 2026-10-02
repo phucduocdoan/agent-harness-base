@@ -99,7 +99,7 @@ class CompactionSession(Protocol):
 
     def append(self, event: dict[str, Any]) -> None: ...
 
-    def plan_compaction(self) -> CompactionPlan | None: ...
+    def plan_compaction(self, *, force: bool = False) -> CompactionPlan | None: ...
 
     def apply_compaction(self, plan: CompactionPlan, summary: str) -> str | None: ...
 
@@ -110,8 +110,14 @@ async def maybe_compact(
     llm: Summarizer,
     system: str,
     tools: list[dict[str, Any]],
+    force: bool = False,
 ) -> bool:
     """Nén nếu Session bảo là cần. Trả về có nén được hay không.
+
+    `force=True` là `/compact` gõ tay: cùng một đường, chỉ khác ở chỗ Session
+    không hỏi ngưỡng nữa. Không tách thành hàm riêng, vì mọi thứ sau lúc lập
+    kế hoạch — gọi model, bỏ qua tool call, ghi lý do khi hỏng — đều y hệt;
+    tách ra là nhân đôi phần dễ lệch nhau nhất.
 
     `system` và `tools` truyền vào Y HỆT request vừa gửi, không phải một bộ rút
     gọn. Nghe thì thừa — model chỉ cần viết văn, đâu cần tool schema — nhưng
@@ -139,7 +145,7 @@ async def maybe_compact(
     bên đó chứ không nằm đây, vì đếm được là phải đọc log — mà log là của
     Session. File này chỉ ghi vào, không đếm.
     """
-    plan = session.plan_compaction()
+    plan = session.plan_compaction(force=force)
     if plan is None:
         return False
 

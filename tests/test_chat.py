@@ -73,6 +73,74 @@ def _chat_kwargs(llm: Any, session: Session, *lines: str) -> dict[str, Any]:
     }
 
 
+# -------------------------------------------------------------------- /compact
+
+
+def _duoi_nguong() -> Session:
+    """Session chưa tới ngưỡng tự nén, nhưng đã có gì đó để nén.
+
+    Hai điều kiện phải cùng đúng thì test mới chứng minh được điều nó nói:
+    dưới `_COMPACTION_THRESHOLD` (0.8) để đường tự động nằm im, và trên
+    `_COMPACTION_RETAIN` (0.16) để còn turn cũ ngoài vùng giữ nguyên văn.
+    """
+    session = Session(max_tokens=1_500)
+    for i in range(3):
+        session.append({"type": "user", "content": f"hỏi {i} " + "x" * 250})
+        session.append({"type": "assistant", "content": f"đáp {i} " + "y" * 250,
+                        "tool_calls": []})
+    return session
+
+
+@pytest.mark.asyncio
+async def test_compact_nen_ngay_du_chua_toi_nguong(capsys: Any) -> None:
+    """Gõ `/compact` là bỏ qua ngưỡng — đó là toàn bộ khác biệt với đường tự động."""
+    session = _duoi_nguong()
+    assert session.plan_compaction() is None, "chưa tới ngưỡng thì tự động phải nằm im"
+
+    llm = FakeLLM([AssistantMessage(text="checkpoint của ba turn")])
+    assert await chat(**_chat_kwargs(llm, session, "/compact")) == 0
+
+    assert any(event["type"] == "compaction" for event in session.events)
+    assert "đã nén" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_compact_khong_phai_mot_turn(capsys: Any) -> None:
+    """`/compact` không được ghi gì vào log như một câu hỏi của người dùng."""
+    session = _duoi_nguong()
+    llm = FakeLLM([AssistantMessage(text="checkpoint")])
+    await chat(**_chat_kwargs(llm, session, "/compact"))
+
+    assert all(event["content"] != "/compact" for event in session.events)
+
+
+@pytest.mark.asyncio
+async def test_compact_khong_co_ngan_sach_thi_noi_thang(capsys: Any) -> None:
+    """Im lặng không làm gì là tệ nhất: người gõ sẽ tưởng là đã nén."""
+    session = Session()
+    session.append({"type": "user", "content": "hỏi"})
+    llm = FakeLLM([AssistantMessage(text="không bao giờ được gọi")])
+
+    await chat(**_chat_kwargs(llm, session, "/compact"))
+
+    ra = capsys.readouterr().out
+    assert "không nén được" in ra and "ngân sách" in ra
+    assert all(event["type"] != "compaction" for event in session.events)
+
+
+@pytest.mark.asyncio
+async def test_compact_hong_thi_in_ly_do_va_chat_van_chay(capsys: Any) -> None:
+    """Hỏng là chuyện của một lệnh, không phải của cả phiên."""
+    class LLMHong:
+        async def generate(self, **_kwargs: Any) -> AssistantMessage:
+            raise RuntimeError("502 Bad Gateway")
+
+    session = _duoi_nguong()
+    assert await chat(**_chat_kwargs(LLMHong(), session, "/compact")) == 0
+    ra = capsys.readouterr().out
+    assert "không nén được" in ra and "502 Bad Gateway" in ra
+
+
 # ------------------------------------------------------------------ multi-turn
 
 

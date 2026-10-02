@@ -646,6 +646,31 @@ async def test_nen_duoc_mot_lan_thi_cau_dao_dong_lai() -> None:
     assert session._failures_since_compaction() == 0
 
 
+def test_force_bo_qua_nguong_va_cau_dao_nhung_khong_bo_qua_gi_khac() -> None:
+    """`/compact` gõ tay bỏ qua ĐÚNG hai chốt, và giữ nguyên các chốt còn lại.
+
+    Cả ngưỡng lẫn cầu dao đều chỉ tồn tại để quyết định khi nào TỰ nén — người
+    dùng gõ lệnh là đã tự quyết hộ. Nhưng `retain` và chốt "không còn gì mới
+    để nén" thì không liên quan gì tới chuyện ai quyết, nên `force` không được
+    phá: phá là nén mất chính câu hỏi đang chạy, hoặc trả tiền model để tóm
+    tắt lại bản tóm tắt vừa viết.
+    """
+    session = Session(events=_flat(*[_turn(tag, size=300) for tag in "abcde"]),
+                      max_tokens=3_000)
+    for _ in range(Session._COMPACTION_MAX_FAILURES):
+        session.append({"type": "compaction_failed", "content": "502 Bad Gateway"})
+
+    assert session.plan_compaction() is None, "chưa tới ngưỡng, lại còn đang ngắt"
+    plan = session.plan_compaction(force=True)
+    assert plan is not None
+    assert plan.covers < len(session.events), "vùng giữ nguyên văn vẫn phải còn"
+
+    assert session.apply_compaction(plan, "checkpoint a..e") is None
+    assert session.plan_compaction(force=True) is None, (
+        "nén xong rồi thì force cũng không có gì mới để nén"
+    )
+
+
 def test_cau_dao_song_sot_qua_resume(tmp_path) -> None:
     """Trạng thái cầu dao đọc ra từ log, nên resume không reset nó.
 
