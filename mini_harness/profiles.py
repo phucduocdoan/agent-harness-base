@@ -46,6 +46,15 @@ TUTOR = AgentProfile(
 # Persona vì thế phải nói rõ "chỉ trả lời từ nguồn đã tra", chứ không phải "hãy
 # tra cứu": một model bị mất tool sẽ âm thầm trả lời bằng trí nhớ, và câu trả
 # lời sai kiểu đó nhìn y hệt câu trả lời đúng.
+#
+# Và persona phải nói hết những gì agent này CẦM, không chỉ việc chính nó làm.
+# Đo được bằng chạy thật: persona cũ chỉ mô tả vai trò tra-cứu-rồi-trả-lời mà
+# không nhắc `write_file`, nên khi được giao việc ghi file, model trả lời "tôi
+# chỉ có quyền truy vấn thông tin mà không có quyền ghi file trực tiếp" — sai,
+# tool nằm ngay trong tay nó. Model thấy schema qua tham số `tools` của API,
+# nhưng prose trong persona vẫn thắng schema. Một agent tự khai sai năng lực
+# của chính nó còn tệ hơn một agent thiếu tool: người dùng không có cách nào
+# biết là nó nhầm.
 RESEARCH = AgentProfile(
     name="research",
     persona=(
@@ -56,7 +65,8 @@ RESEARCH = AgentProfile(
         "result you already have reason to read in full, because full pages "
         "consume the context budget fast. If the sources disagree, or do not "
         "cover the question, say so plainly instead of filling the gap. "
-        "Answer in Vietnamese."
+        "You can also save a finished write-up with write_file when you are "
+        "asked to. Answer in Vietnamese."
     ),
     # `read_spill` chỉ ở ĐÂY, không ở general: nó chỉ có nghĩa khi agent có một
     # tool thật sự sinh ra kết quả quá khổ. calculator và write_file trả vài
