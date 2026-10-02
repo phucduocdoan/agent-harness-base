@@ -60,7 +60,16 @@ def test_tutor_khong_cam_tool_nao():
 
 
 def test_general_cam_dung_tool_minh_khai_bao():
-    names = {schema["name"] for schema in build_tools(GENERAL.tools).schemas()}
+    # `task` giờ nằm trong GENERAL.tools (xem BASE_TOOLS), nên build_tools cần
+    # wiring của nó — spawn/sub_llm/sub_runs giả, vì test này chỉ kiểm tên tool
+    # hiện ra đúng, không kiểm `task` chạy thật.
+    names = {
+        schema["name"]
+        for schema in build_tools(
+            GENERAL.tools, spawn=lambda _name: (None, None, ""),
+            sub_llm=object(), sub_runs=[],
+        ).schemas()
+    }
     assert names == set(GENERAL.tools)
 
 

@@ -91,13 +91,21 @@ def test_moi_ket_qua_deu_co_url():
 # ------------------------------------------------------------------- wiring
 
 
-def test_research_cam_web_search_write_file_va_read_spill(monkeypatch):
+def test_research_cam_dung_tool_minh_khai_bao(monkeypatch):
     from mini_harness.app import build_tools
     from mini_harness.core.session import Session
 
     monkeypatch.setenv("TAVILY_API_KEY", "key-gia")
-    names = {s["name"] for s in build_tools(RESEARCH.tools, session=Session()).schemas()}
-    assert names == {"web_search", "write_file", "read_spill"}
+    # RESEARCH.tools giờ cũng có `task` (xem BASE_TOOLS), nên cần wiring giả
+    # cho nó — test này kiểm bộ tool của research, không kiểm `task` chạy thật.
+    names = {
+        s["name"]
+        for s in build_tools(
+            RESEARCH.tools, session=Session(),
+            spawn=lambda _name: (None, None, ""), sub_llm=object(), sub_runs=[],
+        ).schemas()
+    }
+    assert names == {"calculator", "write_file", "task", "web_search", "read_spill"}
 
 
 def test_thieu_api_key_thi_dung_ngay_chu_khong_bo_tool(monkeypatch):
@@ -114,4 +122,14 @@ def test_agent_khong_can_search_thi_khong_doi_key(monkeypatch):
     from mini_harness.profiles import GENERAL
 
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
-    assert {s["name"] for s in build_tools(GENERAL.tools).schemas()} == set(GENERAL.tools)
+    # GENERAL.tools có `task` (BASE_TOOLS) nên cần wiring giả cho nó; cái test
+    # này thật sự kiểm là thiếu TAVILY_API_KEY không ảnh hưởng tới agent không
+    # khai web_search.
+    names = {
+        s["name"]
+        for s in build_tools(
+            GENERAL.tools, spawn=lambda _name: (None, None, ""),
+            sub_llm=object(), sub_runs=[],
+        ).schemas()
+    }
+    assert names == set(GENERAL.tools)

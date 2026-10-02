@@ -45,7 +45,10 @@ Vì sao xếp như vậy, và chỗ nào thì khác Codex / Claude Code:
 - **Nén** bằng bản tóm tắt *do chính model viết*, tự nổ ở ngưỡng 0.8 ngân sách,
   hoặc gõ `/compact`. Ngân sách neo lại theo `usage` API trả về, không đoán suông.
 - **Sub-agent**: `task` chạy một agent khác trong `Session` riêng, ngân sách
-  riêng; cha chỉ nhận lại đúng đoạn text cuối. Model tự gọi, hoặc người dùng gõ
+  riêng; cha chỉ nhận lại đúng đoạn text cuối. Mọi agent đều uỷ quyền được —
+  `task` là tool mặc định, không phải tính cách riêng của một agent — nhưng con
+  không uỷ quyền tiếp được: cây sâu đúng một tầng. `tutor` là ngoại lệ cố ý,
+  không cầm tool nào kể cả `task`. Model tự gọi, hoặc người dùng gõ
   `/task <agent> <việc>`.
 - **Log bền**: `--session` ghi/resume, `--replay` phát lại log cũ không cần API key.
 - **Lỗi mạng**: thử lại chỉ *trước* token đầu — sau đó chữ đã nằm trên màn hình
@@ -53,8 +56,7 @@ Vì sao xếp như vậy, và chỗ nào thì khác Codex / Claude Code:
   trong log, nên replay không phát ra một hội thoại khác cái vừa xem.
 - **Tool registry**: JSON Schema validate trước khi chạy, cổng xin phép, và mọi
   lỗi thành kết quả model đọc được chứ không thành exception.
-- **Bốn agent** sẵn có: `general`, `tutor` (cố tình không có tool), `research`,
-  `lead`.
+- **Ba agent** sẵn có: `general`, `tutor` (cố tình không có tool), `research`.
 
 ## Chạy
 
@@ -65,7 +67,6 @@ python3 -m mini_harness --azure --session run.jsonl # ghi/resume event log
 python3 -m mini_harness --replay run.jsonl          # phát lại log cũ, không cần API key
 python3 -m mini_harness --azure --agent tutor       # đổi persona + tập tool
 python3 -m mini_harness --azure --agent research    # cần TAVILY_API_KEY
-python3 -m mini_harness --azure --agent lead        # giao việc cho sub-agent
 python3 -m pytest -q
 ```
 
@@ -105,7 +106,7 @@ mini_harness/
            task.py                           # giao việc cho sub-agent
   cli/     terminal.py  chat.py              # chỗ duy nhất in ra màn hình
   context.py                                 # giờ, workspace — chạm thế giới thật
-  profiles.py                                # general, tutor, research, lead
+  profiles.py                                # general, tutor, research
   app.py                                     # chỗ duy nhất biết tất cả những thứ trên
 tests/                                       # không gọi API thật, chạy được offline
 ```

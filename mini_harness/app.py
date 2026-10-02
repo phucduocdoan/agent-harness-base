@@ -30,7 +30,7 @@ from mini_harness.core.session import Session
 from mini_harness.llm.azure import AzureLLM
 from mini_harness.llm.deepseek import DeepSeekLLM
 from mini_harness.llm.replay import ReplayLLM
-from mini_harness.profiles import DEFAULT_AGENT, LEAD_DELEGATES, PROFILES
+from mini_harness.profiles import DEFAULT_AGENT, PROFILES
 from mini_harness.tools.calculator import calculator_tool
 from mini_harness.tools.read_spill import read_spill_tool
 from mini_harness.tools.registry import Approver, ToolDefinition, ToolRegistry
@@ -99,27 +99,23 @@ def build_task_tool(
 ) -> ToolDefinition:
     """Dựng tool `task` — dùng chung cho CẢ HAI lối uỷ quyền.
 
-    Hai lối: model tự gọi (tool nằm trong registry của `lead`), và người dùng
-    gõ `/task <agent> <việc>` (tool nằm trong một registry riêng chỉ có nó, vì
-    lệnh đó phải gõ được cả khi agent đang chạy không hề cầm `task`). Một hàm
-    cho cả hai để phép chặn độ sâu dưới đây không có đường nào đi vòng.
+    Hai lối: model tự gọi (tool nằm trong registry của chính agent đang chạy,
+    vì `task` nằm trong `BASE_TOOLS` của mọi profile), và người dùng gõ
+    `/task <agent> <việc>` (tool nằm trong một registry riêng chỉ có nó, vì
+    lệnh đó phải gõ được cả khi agent đang chạy không hề cầm `task`).
 
     Hai lối thì dựng hai `ToolDefinition`, nhưng chúng không phải hai trạng
     thái: cả hai đóng gói cùng một `spawn` và cùng một `sub_runs`, nên số thứ
     tự trong `/task N` vẫn liên tục dù lần uỷ quyền đó do model hay do người
     dùng khởi xướng.
 
-    Raises:
-        ValueError: một profile được uỷ quyền lại cầm `task`, tức là cây agent
-            sâu quá một tầng. Kiểm NGAY LÚC KHỞI ĐỘNG chứ không lúc chạy: cây
-            sâu bao nhiêu là tính chất đọc được từ dữ liệu, nên không có lý do
-            gì để nó chỉ lộ ra sau khi đã đốt vài lượt API.
+    `delegatable` là toàn bộ `PROFILES`: ai cũng uỷ quyền được, cho bất kỳ
+    agent nào. Độ sâu của cây không kiểm ở đây — nó bị chặn bằng CẤU TRÚC ở
+    `build_spawn` (con không bao giờ nhận `task` trong tool của nó), nên không
+    còn phép kiểm nào cần chạy lúc khởi động để giữ cây sâu đúng một tầng.
     """
-    nested = [name for name in LEAD_DELEGATES if "task" in PROFILES[name].tools]
-    if nested:
-        raise ValueError(f"profile được uỷ quyền không được cầm task: {nested}")
     return task_tool(
-        spawn=spawn, llm=sub_llm, delegatable=LEAD_DELEGATES, runs=sub_runs,
+        spawn=spawn, llm=sub_llm, delegatable=tuple(PROFILES), runs=sub_runs,
     )
 
 
@@ -182,10 +178,11 @@ def build_tools(
     # một agent khác. Ba thứ nó thiếu đều là thứ chỉ `main()` cầm — cùng dạng
     # với TAVILY_API_KEY và `session` ở trên, và cũng DỪNG chứ không bỏ qua.
     #
-    # Đường duy nhất tới nhánh này trong thực tế là `--replay --agent lead`:
-    # replay không có `summarizer` vì nó không gọi model thật. Và nó dừng ở đây
-    # là đúng — một lần uỷ quyền KHÔNG replay được, vì hội thoại của con nằm ở
-    # log khác, còn log đang phát lại chỉ chứa câu trả lời cuối của nó.
+    # Một lần uỷ quyền KHÔNG replay được: hội thoại của con nằm ở log khác, còn
+    # log đang phát lại chỉ chứa câu trả lời cuối của nó. `main()` biết trước
+    # điều đó (qua `summarizer is None`) nên tự lọc `task` ra và nói cho người
+    # dùng biết, nên nhánh dưới đây chỉ còn là lưới an toàn cho lỗi lập trình —
+    # không phải đường đi bình thường của `--replay`.
     if "task" in allow:
         if spawn is None or sub_llm is None or sub_runs is None:
             raise ValueError(
@@ -272,9 +269,16 @@ def build_spawn(
         session.on_event = on_event
         # Approver truyền thẳng xuống, không nới ra: một tool cần duyệt ở cha
         # thì ở con vẫn cần duyệt. Uỷ quyền KHÔNG được là đường leo thang quyền.
+        #
+        # Và `task` bị lọc khỏi tool của CON ngay đây: mọi profile đều khai nó
+        # (`BASE_TOOLS`), không lọc thì con gọi `spawn` tiếp, cây sâu bao nhiêu
+        # cũng được. Đây là chỗ độ sâu bị chặn — chặn bằng CẤU TRÚC, con không có
+        # tool để gọi tiếp — nên không còn phép kiểm nào phải chạy lúc khởi động
+        # như bản cũ (một danh sách "ai được làm cha", kiểm ở `build_task_tool`).
+        con_tools = tuple(t for t in profile.tools if t != "task")
         return (
             session,
-            build_tools(profile.tools, approver, session),
+            build_tools(con_tools, approver, session),
             build_system_prompt(profile),
         )
     return spawn
@@ -431,8 +435,18 @@ async def main() -> int:
     # `--replay`, mà replay thì không uỷ quyền được (xem `build_tools`).
     delegate: ToolRegistry | None = None
     try:
+        # `--replay` không gọi model nên không uỷ quyền được, và từ khi `task`
+        # vào `BASE_TOOLS` điều đó đúng cho MỌI agent. Lọc ở ĐÂY — nơi duy nhất
+        # biết mình đang replay — chứ không nới luật của `build_tools`: luật đó
+        # còn phải bắt lỗi lập trình ở các đường gọi khác. Và in ra chứ không
+        # lặng lẽ bỏ, vì im lặng thì người phát lại một log CÓ uỷ quyền sẽ không
+        # hiểu vì sao lần này nó không xảy ra.
+        agent_tools = profile.tools
+        if summarizer is None and "task" in agent_tools:
+            agent_tools = tuple(t for t in agent_tools if t != "task")
+            print("(replay: không uỷ quyền được)")
         tools = build_tools(
-            profile.tools, ask_terminal, session,
+            agent_tools, ask_terminal, session,
             spawn=spawn, sub_llm=summarizer, sub_runs=sub_runs,
         )
         if summarizer is not None:

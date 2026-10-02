@@ -56,7 +56,10 @@ def task_tool(
 
     `delegatable` đi thẳng vào JSON Schema qua `"enum"`, nên registry CỦA CHA
     đã chặn tên profile sai trước khi `execute` chạy — `_task` dưới đây không
-    kiểm tra lại tên, vì tới được đó nghĩa là validator đã cho qua rồi.
+    kiểm tra lại tên, vì tới được đó nghĩa là validator đã cho qua rồi. Từ khi
+    `task` vào `BASE_TOOLS`, `delegatable` là toàn bộ `PROFILES` chứ không còn
+    một danh sách con do một profile riêng chọn ra — chặn độ sâu nằm ở chỗ
+    khác (xem `app.py::build_spawn`), không phải ở tham số này nữa.
 
     `runs` do app.py sở hữu; mỗi lần `task` chạy, session con được append vào
     đây. Đây là cách `/task` xem lại được một lượt uỷ quyền, kể cả khi phiên
@@ -85,6 +88,13 @@ def task_tool(
     # `ToolResult(is_error=True)` để model cha đọc được. `CancelledError` kế
     # thừa `BaseException` nên không rơi vào bọc đó — Ctrl-C vẫn xuyên qua
     # đúng một tầng registry, không phải hai.
+    #
+    # Văn xuôi dạy ĐÚNG LÚC NÀO nên uỷ quyền nằm ở description, không ở persona.
+    # `task` trong `BASE_TOOLS` nghĩa là mọi persona đều cầm nó, nên để ở persona
+    # là bắt từng persona chép lại một đoạn, và persona nào quên chép thì agent
+    # đó giao việc bừa. Repo trả giá bài này một lần rồi với `research`: persona
+    # quên nhắc `write_file` nên model tự khai là nó không có quyền ghi file (xem
+    # comment trên `RESEARCH` ở `profiles.py`).
     return define_tool(
         name="task",
         description=(
@@ -93,7 +103,11 @@ def task_tool(
             "conversation and returns only its final answer, so `task` must "
             "contain everything it needs to know. Prefer it for work whose "
             "intermediate results you do not need: searching, reading long "
-            "pages, scanning many documents."
+            "pages, scanning many documents. Do not hand off what you can "
+            "answer directly: every delegation is a full model run. When an "
+            "answer comes back it is the sub-agent's work, not yours: say "
+            "where it came from, and say plainly if it does not actually "
+            "answer the question."
         ),
         parameters={
             "agent": {

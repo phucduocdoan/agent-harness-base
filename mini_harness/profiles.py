@@ -16,19 +16,33 @@ from __future__ import annotations
 
 from mini_harness.core.agent import AgentProfile
 
+# Tool mọi agent mặc định cầm. `task` nằm đây chứ không trong persona của một
+# profile riêng, vì uỷ quyền là HẠ TẦNG chứ không phải tính cách: bắt chọn đúng
+# một profile-biết-giao-việc lúc khởi động là bắt người dùng trả lời "lát nữa
+# tôi có cần giao việc không" TRƯỚC khi hội thoại bắt đầu — mà nhu cầu đó chỉ
+# lộ ra giữa chừng.
+BASE_TOOLS = ("calculator", "write_file", "task")
+
 GENERAL = AgentProfile(
     name="general",
     persona=(
         "You are a helpful assistant. Use the calculator tool for any "
         "arithmetic instead of computing it yourself. Answer in Vietnamese."
     ),
-    tools=("calculator", "write_file"),
+    tools=BASE_TOOLS,
 )
 
 # Tutor KHÔNG có tool nào, và đó chính là nội dung của thiết kế chứ không phải
 # thiếu sót: một gia sư cầm calculator sẽ tự bấm ra đáp án, đúng cái việc học
 # trò cần tự làm. Ở đây "agent là gì" được quyết định bằng cái nó KHÔNG có,
 # nhiều ngang cái nó có.
+#
+# Tutor cầm `task` còn tệ hơn tutor cầm calculator: calculator chỉ ra đáp số,
+# còn `task` giao thẳng CẢ CÂU HỎI cho `general` rồi đọc nguyên văn kết quả về
+# — không còn một bước tính nào lộ ra để học trò nhìn theo, vì học trò thậm chí
+# không thấy có phép tính nào xảy ra. Vì vậy TUTOR không kế thừa `BASE_TOOLS`:
+# đây là một opt-out CÓ CHỦ Ý khỏi tập tool mặc định, không phải một profile bị
+# bỏ quên khi `BASE_TOOLS` được thêm vào.
 TUTOR = AgentProfile(
     name="tutor",
     persona=(
@@ -72,39 +86,15 @@ RESEARCH = AgentProfile(
     # tool thật sự sinh ra kết quả quá khổ. calculator và write_file trả vài
     # dòng, không bao giờ chạm trần cắt — cấp read_spill cho general là thêm
     # một schema model không bao giờ dùng vào mọi request.
-    tools=("web_search", "write_file", "read_spill"),
+    tools=BASE_TOOLS + ("web_search", "read_spill"),
 )
 
-# Lead là agent đầu tiên có một tool gọi lại chính harness: `task` chạy hẳn một
-# agent khác trong một session khác. Persona vì thế phải dạy ĐÚNG LÚC NÀO nên
-# uỷ quyền, không phải dạy cách gọi tool — cái sai đắt nhất ở đây không phải gọi
-# sai cú pháp mà là uỷ quyền một việc lẽ ra tự trả lời được, hoặc viết câu giao
-# việc thiếu ngữ cảnh cho một agent không đọc được hội thoại này.
-LEAD = AgentProfile(
-    name="lead",
-    persona=(
-        "You are a lead assistant who decides what to do yourself and what to "
-        "hand off. You have sub-agents available through the task tool. A "
-        "sub-agent runs in its own context window: it sees nothing of this "
-        "conversation, it cannot ask you anything, and it returns one final "
-        "answer. So hand off work whose intermediate steps you do not need to "
-        "see — searching the web, reading long pages — and write the task as a "
-        "standalone brief that names every fact the sub-agent needs. Do not "
-        "hand off what you can answer directly: every delegation is a full "
-        "model run. When an answer comes back it is the sub-agent's work, not "
-        "yours: say where it came from, and say plainly if it does not "
-        "actually answer the question. Answer in Vietnamese."
-    ),
-    tools=("calculator", "task"),
-)
-
-# Ai được uỷ quyền. Đây là chỗ ĐỘ SÂU bị chặn, và chặn bằng DỮ LIỆU chứ không
-# bằng một biến đếm chạy lúc runtime: profile nào có tên trong đây mà lại cầm
-# `task` thì mới có cháu, nên chỉ cần nhìn hai dòng này cạnh nhau là biết cây
-# sâu tới đâu. `app.py` kiểm lại điều kiện đó lúc khởi động.
-LEAD_DELEGATES = ("research",)
-
+# Không còn một profile riêng cho "agent biết giao việc" nữa: giờ `task` nằm
+# trong `BASE_TOOLS` nên MỌI agent đều biết giao việc — không còn gì để một
+# profile riêng tách ra. Độ sâu của cây uỷ quyền giờ bị chặn bằng CẤU TRÚC ở
+# `app.py` (con không bao giờ nhận `task`), không phải bằng một danh sách
+# profile được phép làm cha như trước đây.
 PROFILES = {
-    profile.name: profile for profile in (GENERAL, TUTOR, RESEARCH, LEAD)
+    profile.name: profile for profile in (GENERAL, TUTOR, RESEARCH)
 }
 DEFAULT_AGENT = GENERAL.name

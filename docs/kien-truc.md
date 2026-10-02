@@ -125,8 +125,8 @@ result ở đó vẫn gọi lại được bằng `call_id`. Và ngân sách cũ
 
 ## 3. Agent là dữ liệu
 
-Một **loại agent** (`general`, `tutor`, `research`, `lead`) là *dữ liệu*, không
-phải class con: persona + tập tool, khai báo trong `profiles.py`. Thêm agent mới
+Một **loại agent** (`general`, `tutor`, `research`) là *dữ liệu*, không phải
+class con: persona + tập tool, khai báo trong `profiles.py`. Thêm agent mới
 không sửa dòng nào trong `core/loop.py` hay `tools/registry.py`.
 
 Hai chi tiết đáng chú ý, vì cả hai đều là quyết định chứ không phải thiếu sót:
@@ -169,7 +169,7 @@ flowchart TB
     B5 -- "chỉ text cuối bắc cầu về" --> A3
 ```
 
-Đo thật, một câu hỏi buộc `lead` giao việc tra cứu cho `research`: con đi 4 step,
+Đo thật, một câu hỏi buộc agent cha giao việc tra cứu cho `research`: con đi 4 step,
 đọc 26.435 ký tự tool result, đốt 13.984 token; cha nhận lại 3.113 ký tự và
 request cuối của cha được API đo **1.318 token**. Dựng lại phản-thực bằng chính
 bộ ước lượng của `Session` — cùng hội thoại đó nhưng cha tự làm lấy — cửa sổ cha
@@ -192,18 +192,19 @@ cách mua thêm hạn mức.
 flowchart LR
     M["model tự gọi tool task<br><i>giữa turn, đúng lúc nó nhận ra</i>"] --> TD
     U["người dùng gõ /task &lt;agent&gt; &lt;việc&gt;<br><i>chỉ lúc đứng ở prompt, nhưng<br>không phải thuyết phục model</i>"] --> TD
-    TD["build_task_tool — một ToolDefinition<br>enum chặn tên agent · chặn độ sâu · sổ sub_runs chung"] --> SP["spawn → run_turn của con"]
+    TD["build_task_tool — một ToolDefinition<br>enum chặn tên agent · sổ sub_runs chung"] --> SP["spawn → run_turn của con<br>lọc task ra: cây sâu đúng một tầng"]
 ```
 
 Model gọi tool được **giữa turn**, đúng lúc nó vừa nhận ra nên đưa việc đi chỗ
 khác — lệnh gõ tay không làm được điều đó. Đổi lại, lệnh làm được thứ tool không
 làm được: uỷ quyền mà không phải thuyết phục model rằng nên uỷ quyền, và uỷ quyền
-được từ một agent **không hề cầm `task`** (`general`, `tutor`). Hai lối bù cho
-nhau chứ không thay nhau.
+được từ một agent **không hề cầm `task`** (`tutor` — agent duy nhất cố ý không
+kế thừa tập tool mặc định). Hai lối bù cho nhau chứ không thay nhau.
 
-Cả hai dùng chung một `ToolDefinition` dựng ở `build_task_tool`, nên phép chặn độ
-sâu không có đường đi vòng, và cùng chung sổ `sub_runs` nên số thứ tự trong
-`/task N` vẫn liên tục dù lần uỷ quyền do ai khởi xướng.
+Cả hai dùng chung một `ToolDefinition` dựng ở `build_task_tool` và chung sổ
+`sub_runs`, nên số thứ tự trong `/task N` vẫn liên tục dù lần uỷ quyền do ai khởi
+xướng. Phép chặn độ sâu không nằm ở đây mà ở `spawn` — nơi cả hai lối đều đi
+qua — nên cũng không có đường đi vòng.
 
 `/task` và `/task N` là cách xem **sau khi** con chạy xong. Lúc nó đang chạy thì
 từng tool nó gọi đã được in ra, thụt vào bốn dấu cách để phân biệt với hoạt động
@@ -217,12 +218,20 @@ giả vào log cha để "cho nó biết" là bịa ra đoạn hội thoại ch�
 
 ### Ba chốt an toàn
 
-- **Độ sâu chặn bằng dữ liệu**, không bằng biến đếm lúc chạy: `LEAD_DELEGATES`
-  nói ai được giao việc, và `app.py` kiểm **lúc khởi động** rằng không ai trong
-  số đó cầm `task`. Nhìn hai dòng cạnh nhau là biết cây sâu tới đâu.
+- **Độ sâu chặn bằng CẤU TRÚC**, không bằng dữ liệu hay biến đếm lúc chạy: `task`
+  nằm trong `BASE_TOOLS` của mọi profile, nên `app.py::build_spawn` lọc nó khỏi
+  tập tool của CON trước khi dựng registry cho con — con không có tool để gọi
+  tiếp, nên cây chắc chắn sâu đúng một tầng. Từng có một danh sách dữ liệu nói
+  ai được giao việc, và một phép kiểm lúc khởi động rằng không ai trong số đó
+  cầm `task`; cả hai biến mất vì không còn gì để liệt kê — mọi agent đều cầm
+  `task` như nhau, điều kiện chặn phải nằm ở chỗ con được dựng, không ở chỗ cha
+  được chọn.
 - **Approver truyền thẳng xuống con**, không nới ra: một tool cần duyệt ở cha thì
   ở con vẫn cần duyệt. Uỷ quyền không được là đường leo thang quyền.
-- **`--replay --agent lead` dừng ngay** chứ không chạy thử: hội thoại của con nằm
-  ở log riêng (`run.task-1.jsonl`), còn log đang phát lại chỉ chứa đúng câu trả
-  lời cuối của nó. Cho chạy tiếp là gọi model thật giữa một phiên vốn hứa không
-  chạm API.
+- **`--replay` dừng ngay nếu agent có `task`** chứ không chạy thử: hội thoại của
+  con nằm ở log riêng (`run.task-1.jsonl`), còn log đang phát lại chỉ chứa đúng
+  câu trả lời cuối của nó. Cho chạy tiếp là gọi model thật giữa một phiên vốn
+  hứa không chạm API. Vì `task` nằm trong `BASE_TOOLS`, `main()` tự lọc nó ra
+  khi replay và nói ra cho người dùng biết (`(replay: không uỷ quyền được)`);
+  phép kiểm nghiêm ở `build_tools` vẫn còn, nhưng chỉ còn là lưới an toàn cho
+  lỗi lập trình, không phải đường đi bình thường của `--replay` nữa.

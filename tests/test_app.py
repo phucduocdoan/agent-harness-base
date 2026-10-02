@@ -20,7 +20,6 @@ from typing import Any
 import pytest
 
 from mini_harness import app
-from mini_harness.core.agent import AgentProfile
 from mini_harness.core.session import Session
 from mini_harness.core.types import AssistantMessage
 from fakes import FakeLLM
@@ -94,30 +93,34 @@ async def test_tool_can_duyet_o_cha_thi_o_con_van_can_duyet() -> None:
     assert ket_qua.is_error and "was denied" in ket_qua.content
 
 
-def test_profile_duoc_uy_quyen_khong_duoc_cam_task(monkeypatch: Any) -> None:
-    """Chặn độ sâu, và chặn NGAY LÚC KHỞI ĐỘNG.
+def test_con_khong_bao_gio_cam_task() -> None:
+    """Khoá bất biến chặn độ sâu: agent CON không bao giờ cầm `task`.
 
-    Để nó chỉ lộ ra lúc chạy nghĩa là phát hiện một cây agent đệ quy sau khi đã
-    đốt vài lượt API — mà cây sâu bao nhiêu thì đọc `profiles.py` là biết, nên
-    không có lý do gì phải đợi tới đó.
+    `task` nằm trong `BASE_TOOLS` nên MỌI profile khai báo nó, kể cả profile
+    đang được spawn làm con — không còn một danh sách "ai được uỷ quyền" nào
+    tách biệt với "ai được tự chạy" để mà kiểm lúc khởi động nữa (hằng số và
+    phép kiểm cũ cho việc đó đã bị xoá). Nếu `build_spawn` không lọc `task` ra
+    trước khi dựng tool cho con, con sẽ có `task` ngay trong registry của
+    chính nó và gọi tiếp `spawn` — cây uỷ quyền sâu vô hạn. Test này khoá đúng
+    cái kết quả đó, không khoá cách làm: registry trả về cho con phải không có
+    schema `task`.
     """
-    monkeypatch.setitem(
-        app.PROFILES, "research",
-        AgentProfile(name="research", persona="x", tools=("task",)),
-    )
-    with pytest.raises(ValueError, match="không được cầm task"):
-        app.build_tools(
-            ("task",), spawn=lambda _name: (None, None, ""),  # type: ignore[arg-type,return-value]
-            sub_llm=object(), sub_runs=[],
-        )
+    _session, tools, _system = app.build_spawn(runs=[])("general")
+    names = {schema["name"] for schema in tools.schemas()}
+    assert "task" not in names
+    assert names == {"calculator", "write_file"}
 
 
 def test_replay_mot_lan_uy_quyen_thi_dung_han_chu_khong_chay_that() -> None:
-    """`--replay --agent lead` phải DỪNG, vì uỷ quyền không replay được.
+    """`--replay` phải DỪNG nếu agent có `task`, vì uỷ quyền không replay được.
 
     Log đang phát lại chỉ chứa câu trả lời cuối của con; cả hội thoại của nó
     nằm ở file khác. Cho chạy tiếp thì `task` sẽ gọi model THẬT giữa một phiên
-    replay vốn hứa là không chạm API.
+    replay vốn hứa là không chạm API. Từ khi `task` vào `BASE_TOOLS`, đường tới
+    đây không còn đi qua việc chọn riêng một profile biết giao việc nữa —
+    `main()` tự lọc `task` ra khi replay (xem comment ở đó), nên `build_tools`
+    dưới đây chỉ còn là lưới an toàn cho lỗi lập trình: ai gọi nó với `task` mà
+    thiếu wiring vẫn phải nổ.
     """
     with pytest.raises(ValueError, match="không replay được"):
         app.build_tools(("task",))
