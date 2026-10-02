@@ -17,6 +17,14 @@ toán mà event log vốn đã giải rồi.
 Cái giá của lựa chọn đó: spill sống đúng bằng đời của session. Upstream giữ
 file qua nhiều phiên và grep được; ở đây hết phiên là hết, trừ khi chạy
 `--session` (khi đó log trên đĩa chính là bản lưu). Đổi lại là 0 dòng storage.
+
+Vế "grep được" ở trên không phải phép ẩn dụ suông: `read` của upstream đi kèm
+`grep` để tìm trước khi đọc, vì một kết quả bị giấu có thể dài hàng chục nghìn
+ký tự và model không có cách nào biết cần đọc ở offset nào. Đây KHÔNG phải một
+tính năng mới tự nghĩ ra — nó là nửa còn lại của cùng cặp công cụ đã có sẵn ở
+chỗ khác, dựng lại trên nền event log thay vì file. Tham số `query` dưới đây
+đóng đúng vai trò của `grep`: tìm VỊ TRÍ, không trả nội dung; model thấy vị trí
+rồi tự gọi lại đúng tool này với `offset` để đọc, như `read` vẫn luôn làm.
 """
 
 from __future__ import annotations
@@ -37,6 +45,71 @@ _MAC_DINH = 4_000
 # Cửa sổ vượt trần chiếu thì chính kết quả này cũng bị cắt ruột — vô hại, và
 # cố ý không chống: nó chỉ là luật cũ áp lại một cách nhất quán.
 _TRAN = 16_000
+
+# Nửa cửa sổ trích đoạn quanh một chỗ khớp. Đủ để model thấy chỗ khớp nằm
+# trong câu nào mà không kéo cả đoạn văn về — đọc trọn vẫn là việc của
+# `read_spill` qua offset, trích đoạn ở đây chỉ để NHẬN RA chỗ khớp đúng ý.
+_NUA_TRICH_DOAN = 100
+
+# Trần số kết quả search. Không phải để tiết kiệm token cho MỘT câu trả lời —
+# một query mơ hồ kiểu "the" ra hàng nghìn chỗ khớp trong một kết quả search
+# dài, và liệt kê hết thì search tự nó lại thành một tool result cần bị cắt.
+_TRAN_KET_QUA = 20
+
+
+def _tim_vi_tri(text: str, query: str, call_id: str) -> str:
+    """Tìm chuỗi con `query` trong `text`, trả về VỊ TRÍ chứ không trả nội dung.
+
+    Đây là `grep`, không phải `read`: model tìm được offset rồi tự quay lại
+    gọi `read_spill` với offset đó để đọc. Khớp chuỗi con thường, không phân
+    biệt hoa thường, không regex — đủ cho việc "chỗ nào nhắc tới X", không
+    nhằm thay một công cụ tìm kiếm thật.
+
+    Không khớp KHÔNG phải lỗi: nó là một câu trả lời hợp lệ, y như
+    `web_search` không tìm thấy kết quả.
+    """
+    nguon = text.lower()
+    can_tim = query.lower()
+    vi_tri: list[int] = []
+    tu = 0
+    while True:
+        idx = nguon.find(can_tim, tu)
+        if idx == -1:
+            break
+        vi_tri.append(idx)
+        # Bước qua hết độ dài query, không phải +1: khớp chồng lấn của cùng
+        # một chuỗi lặp (vd query "aa" trong "aaaa") chỉ làm nhiễu danh sách,
+        # không thêm thông tin gì cho model.
+        tu = idx + len(can_tim)
+
+    if not vi_tri:
+        return f'No match for "{query}" in tool result {call_id} ({len(text)} characters).'
+
+    tong = len(vi_tri)
+    hien = vi_tri[:_TRAN_KET_QUA]
+    dong: list[str] = []
+    for idx in hien:
+        dau = max(0, idx - _NUA_TRICH_DOAN)
+        cuoi = min(len(text), idx + len(query) + _NUA_TRICH_DOAN)
+        trich = text[dau:cuoi]
+        if dau > 0:
+            trich = "…" + trich
+        if cuoi < len(text):
+            trich = trich + "…"
+        dong.append(f"offset {idx}: {trich}")
+
+    con_lai = tong - len(hien)
+    phan_duoi = (
+        f"\n\n({con_lai} more match(es) not shown; narrow your query to see them.)"
+        if con_lai
+        else ""
+    )
+    return (
+        f'{tong} match(es) for "{query}" in tool result {call_id}. '
+        "Call read_spill again with one of these offsets to read it in full:\n\n"
+        + "\n\n".join(dong)
+        + phan_duoi
+    )
 
 
 def read_spill_tool(session: Session) -> ToolDefinition:
@@ -64,6 +137,13 @@ def read_spill_tool(session: Session) -> ToolDefinition:
                 f"no tool result with call_id {call_id!r} in this conversation; "
                 "use the call_id printed in the result you want to read"
             )
+
+        # `query` có mặt thì đây là một lượt TÌM, không phải ĐỌC: hai việc
+        # dùng chung một kho (`text` ở trên) nên gộp vào một tool thay vì
+        # tách tool thứ hai phải tự lặp lại đúng đoạn tra cứu call_id này.
+        query = args.get("query")
+        if query:
+            return _tim_vi_tri(text, query, call_id)
 
         offset = max(0, int(args.get("offset", 0)))
         length = min(max(1, int(args.get("length", _MAC_DINH))), _TRAN)
@@ -96,7 +176,11 @@ def read_spill_tool(session: Session) -> ToolDefinition:
             "truncated. A truncated result states its call_id and which "
             "character offsets are hidden; pass that call_id here with the "
             "offset you want. The full text is always available this way, so "
-            "do not re-run the original tool just to see the hidden part."
+            "do not re-run the original tool just to see the hidden part. "
+            "If you don't know which offset to read, pass `query` instead of "
+            "`offset`/`length` to search the stored result for a substring "
+            "first; it returns match locations, not content, so read the "
+            "offset it gives you with a second call."
         ),
         parameters={
             "call_id": {
@@ -118,6 +202,17 @@ def read_spill_tool(session: Session) -> ToolDefinition:
                     f"capped at {_TRAN}. Ask for a small window and continue "
                     "with a second call rather than pulling the whole text back "
                     "into context."
+                ),
+            },
+            "query": {
+                "type": "string",
+                "description": (
+                    "A literal substring to search for in the stored result "
+                    "(case-insensitive, no regex). When set, this call ignores "
+                    "`offset`/`length` and instead returns up to "
+                    f"{_TRAN_KET_QUA} match locations with a short excerpt "
+                    "around each one, so you can see where the text you want "
+                    "lives before reading it in full."
                 ),
             },
         },

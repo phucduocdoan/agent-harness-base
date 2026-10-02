@@ -23,7 +23,7 @@ mini_harness/
            prompt.py  agent.py               # ráp system prompt; agent = dữ liệu
   llm/     stream.py  deepseek.py  azure.py  # chỗ duy nhất biết wire format
   tools/   registry.py  calculator.py  write_file.py  web_search.py
-           read_spill.py                              # đọc lại khúc đã cắt
+           read_spill.py                              # đọc / tìm trong khúc đã cắt
   cli/     terminal.py  chat.py              # chỗ duy nhất in ra màn hình
   context.py                                 # giờ, workspace — chạm thế giới thật
   profiles.py                                # general, tutor, research
@@ -62,7 +62,12 @@ message — một trục khác hẳn, và nó chỉ đáng làm khi số tool đ
 (`docs/claude_code_study_notes.md`).
 
 Chỗ bị cắt để lại **locator**, và tool `read_spill` cầm locator đó đọc ngược vào
-log — nên cắt là *cất đi*, không phải *huỷ*. Kho spill không phải thứ dựng thêm:
+log — nên cắt là *cất đi*, không phải *huỷ*. Nó còn tìm được (`query`), vì một
+kết quả bị giấu có thể dài hàng chục nghìn ký tự và model không có cách nào
+đoán ra nên đọc ở offset nào. Cặp đọc + tìm đó không phải phát minh gì: các
+harness khác ghi spill ra **file**, nên `read` và `grep` sẵn có của chúng đã
+làm đúng việc này. Ở đây kho spill là event log chứ không phải filesystem, nên
+cặp công cụ đó phải dựng lại trên nền khác. Kho spill không phải thứ dựng thêm:
 nó chính là event log. Điều đó đúng cả bên trong vùng đã nén: bản tóm tắt nói
 thẳng với model rằng tool result ở đó vẫn gọi lại được bằng `call_id`. Ngân sách
 cũng không đoán suông — `usage` mà API trả về ở response trước được dùng để neo
