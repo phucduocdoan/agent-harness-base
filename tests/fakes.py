@@ -42,3 +42,24 @@ class FakeLLM:
                 "loop gọi nhiều lần hơn dự kiến"
             )
         return self._script.pop(0)
+
+
+class StreamingFakeLLM(FakeLLM):
+    """FakeLLM nhưng CÓ đẩy text qua `on_text`, đúng như provider thật.
+
+    Tồn tại vì một lỗi chỉ hiện ra khi kênh hiển thị có thật: `FakeLLM` không
+    đẩy gì ra `on_text`, nên nó không phân biệt nổi "text đi ra màn hình" với
+    "text chỉ về tới caller". Mà đó đúng là chỗ phép nén từng rò ra terminal.
+    Đối chiếu `StreamAccumulator.feed` ở llm/stream.py: mảnh `delta.content`
+    nào cũng đi qua `on_text` trước khi được gộp lại.
+    """
+
+    def __init__(self, script: list[AssistantMessage], on_text: Any = None) -> None:
+        super().__init__(script)
+        self._on_text = on_text
+
+    async def generate(self, **kwargs: Any) -> AssistantMessage:
+        reply = await super().generate(**kwargs)
+        if self._on_text is not None and reply.text:
+            self._on_text(reply.text)
+        return reply

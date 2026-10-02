@@ -202,6 +202,21 @@ async def main() -> int:
             if replay_path is not None
             else PROVIDERS[flags[0]](on_text=display)
         )
+        # Provider THỨ HAI, cùng model cùng cấu hình, chỉ khác: KHÔNG có
+        # `on_text`. Dùng cho phép nén.
+        #
+        # Vì sao phải là object khác chứ không phải một cờ: `on_text` gắn vào
+        # provider lúc dựng, nên "có hiển thị hay không" là thuộc tính của cái
+        # object, không phải của từng lần gọi. Mà bản tóm tắt thì không phải
+        # lượt trả lời của model — nó là bookkeeping nội bộ của harness. Dùng
+        # chung một object là đổ nguyên checkpoint ra terminal, và ở đường tự
+        # động nó còn chen vào GIỮA câu trả lời đang stream. Lỗi này chỉ lộ ra
+        # khi chạy thật, vì fake không có kênh hiển thị nào để mà rò.
+        #
+        # `--replay` không cần: ở đó ngân sách là None nên phép nén không chạy.
+        summarizer: Any = (
+            None if replay_path is not None else PROVIDERS[flags[0]]()
+        )
     except RuntimeError as error:
         print(f"không dựng được provider: {error}", file=sys.stderr)
         return 1
@@ -264,13 +279,14 @@ async def main() -> int:
               "Ctrl-D hoặc /quit để thoát")
         return await chat(
             llm=llm, tools=tools, session=session, system=system, display=display,
+            summarizer=summarizer,
         )
 
     print(f"user: {question}")
     try:
         await run_turn(
             llm=llm, tools=tools, session=session,
-            system=system, user_input=question,
+            system=system, user_input=question, summarizer=summarizer,
         )
     except asyncio.CancelledError:
         # Ctrl-C: asyncio.run huỷ task này, nên nó tới đây dưới dạng

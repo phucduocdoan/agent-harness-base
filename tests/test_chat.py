@@ -23,7 +23,7 @@ from mini_harness.core.session import ABORTED_BEFORE_DISPATCH, Session
 from mini_harness.core.types import AssistantMessage, ToolCall
 from mini_harness.tools.calculator import calculator_tool
 from mini_harness.tools.registry import ToolRegistry, define_tool
-from fakes import FakeLLM
+from fakes import FakeLLM, StreamingFakeLLM
 
 
 # ------------------------------------------------------------------- fixtures
@@ -139,6 +139,59 @@ async def test_compact_hong_thi_in_ly_do_va_chat_van_chay(capsys: Any) -> None:
     assert await chat(**_chat_kwargs(LLMHong(), session, "/compact")) == 0
     ra = capsys.readouterr().out
     assert "không nén được" in ra and "502 Bad Gateway" in ra
+
+
+@pytest.mark.asyncio
+async def test_ban_tom_tat_khong_duoc_in_ra_man_hinh(capsys: Any) -> None:
+    """Checkpoint là bookkeeping nội bộ, không phải lượt trả lời của model.
+
+    Lỗi này tìm được bằng chạy thật chứ không phải bằng đọc code: `app.py`
+    dựng provider MỘT lần với `on_text=display`, và phép nén dùng lại đúng
+    object đó — nên cả màn hình bị đổ nguyên bản checkpoint. Test dùng
+    `StreamingFakeLLM` vì chỉ fake có `on_text` mới tái hiện được.
+    """
+    session = _duoi_nguong()
+    display = TerminalStream()
+    # Model hội thoại: CÓ kênh hiển thị, và không được hỏi gì trong test này.
+    llm = StreamingFakeLLM([], on_text=display)
+    summarizer = FakeLLM([AssistantMessage(text="CHECKPOINT-KHONG-DUOC-HIEN")])
+
+    kwargs = _chat_kwargs(llm, session, "/compact")
+    kwargs["display"] = display
+    kwargs["summarizer"] = summarizer
+    assert await chat(**kwargs) == 0
+
+    nen = [event for event in session.events if event["type"] == "compaction"]
+    assert nen and nen[-1]["content"] == "CHECKPOINT-KHONG-DUOC-HIEN", (
+        "phép nén phải đi qua summarizer"
+    )
+    assert llm.requests == [], "model hội thoại không được dùng để tóm tắt"
+    assert "CHECKPOINT-KHONG-DUOC-HIEN" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_nen_tu_dong_giua_turn_cung_khong_in_ra(capsys: Any) -> None:
+    """Đường tự động rò ra màn hình còn tệ hơn: nó chen vào GIỮA câu trả lời.
+
+    Chạy thật in ra `assistant: <nguyên checkpoint><câu trả lời>` dính liền —
+    user không có cách nào biết đâu là câu trả lời của mình.
+    """
+    session = _duoi_nguong()
+    session.max_tokens = 400  # trên ngưỡng -> step đầu của turn sẽ tự nén
+    display = TerminalStream()
+    llm = StreamingFakeLLM([AssistantMessage(text="đáp")], on_text=display)
+    summarizer = FakeLLM([AssistantMessage(text="CHECKPOINT-TU-DONG")])
+
+    kwargs = _chat_kwargs(llm, session, "hỏi tiếp", "/quit")
+    kwargs["display"] = display
+    kwargs["summarizer"] = summarizer
+    assert await chat(**kwargs) == 0
+
+    assert any(event["type"] == "compaction" for event in session.events)
+    assert len(summarizer.requests) == 1
+    ra = capsys.readouterr().out
+    assert "CHECKPOINT-TU-DONG" not in ra
+    assert "đáp" in ra, "câu trả lời thật thì vẫn phải hiện"
 
 
 # ------------------------------------------------------------------ multi-turn

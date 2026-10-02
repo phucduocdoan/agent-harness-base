@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Protocol
 
-from mini_harness.core.compaction import CompactionSession, maybe_compact
+from mini_harness.core.compaction import CompactionSession, Summarizer, maybe_compact
 from mini_harness.core.types import AssistantMessage, ToolResult
 
 # ------------------------------------------------------------------- protocols
@@ -106,6 +106,7 @@ async def run_turn(
     system: str,
     user_input: str,
     max_steps: int = 20,
+    summarizer: Summarizer | None = None,
 ) -> str:
     """Chạy một turn tới khi model trả lời không kèm tool call.
 
@@ -114,6 +115,13 @@ async def run_turn(
     `max_steps` là cần thiết, không phải phòng xa: khi args sai schema, model
     nhận lỗi và thử lại — nếu nó thử mãi thì turn không bao giờ dừng.
     Harness thật đặt việc này ở plugin riêng (packages/guard/).
+
+    `summarizer` là model dùng cho phép NÉN, tách khỏi `llm` dùng cho hội thoại.
+    Mặc định None = dùng chính `llm`. Hai Protocol này vốn đã khác nhau (`LLM`
+    và `Summarizer`); việc app thường đưa cùng một object vào cả hai chỗ là
+    trùng hợp, không phải contract — và đo thật thì chính sự trùng hợp đó là
+    lỗi: provider của hội thoại mang theo kênh hiển thị, nên bản tóm tắt bị in
+    thẳng ra terminal, dính liền vào câu trả lời của model.
 
     Returns:
         Text của lượt trả lời cuối.
@@ -132,7 +140,8 @@ async def run_turn(
         # đúng luật cũ thì nó cũng không được diễn giải con số token nào.
         # Nó chỉ chuyển cho `maybe_compact` ba thứ chỉ mình nó cầm: llm,
         # system prompt, và tập tool schema của request kế tiếp.
-        await maybe_compact(session=session, llm=llm, system=system, tools=tools.schemas())
+        await maybe_compact(session=session, llm=summarizer or llm,
+                            system=system, tools=tools.schemas())
 
         reply = await llm.generate(
             system=system,

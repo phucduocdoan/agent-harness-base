@@ -67,7 +67,7 @@ def print_log(session: Session) -> None:
 
 async def _compact_now(
     *,
-    llm: Any,
+    summarizer: Any,
     tools: Any,
     session: Session,
     system: str,
@@ -88,7 +88,7 @@ async def _compact_now(
         return
 
     truoc = len(session.to_messages())
-    if await maybe_compact(session=session, llm=llm, system=system,
+    if await maybe_compact(session=session, llm=summarizer, system=system,
                            tools=tools.schemas(), force=True):
         print(f"(đã nén: {truoc} → {len(session.to_messages())} message)")
         return
@@ -108,6 +108,7 @@ async def chat(
     session: Session,
     system: str,
     display: TerminalStream,
+    summarizer: Any = None,
     read_line: Callable[[], Awaitable[str]] = _default_read_line,
 ) -> int:
     """Vòng ngoài: một lần lặp = một turn. Đây là vòng LỒNG đầu tiên của harness.
@@ -125,8 +126,12 @@ async def chat(
 
     `read_line` nhận được từ ngoài để test drive được vòng này mà không cần gửi
     signal thật.
+
+    `summarizer` là model dùng cho phép nén — xem `run_turn`. Nó đi qua đây chứ
+    không được dựng ở đây, vì `cli/` không biết provider nào tồn tại.
     """
     loop = asyncio.get_running_loop()
+    summarizer = summarizer if summarizer is not None else llm
     current: asyncio.Task[Any] | None = None
 
     def on_sigint() -> None:
@@ -162,7 +167,8 @@ async def chat(
                 # Dùng lại y nguyên cơ chế huỷ của turn: /compact cũng gọi
                 # model, nên nó cũng phải Ctrl-C được.
                 current = asyncio.create_task(_compact_now(
-                    llm=llm, tools=tools, session=session, system=system,
+                    summarizer=summarizer, tools=tools,
+                    session=session, system=system,
                 ))
                 try:
                     await current
@@ -174,7 +180,7 @@ async def chat(
 
             current = asyncio.create_task(run_turn(
                 llm=llm, tools=tools, session=session,
-                system=system, user_input=question,
+                system=system, user_input=question, summarizer=summarizer,
             ))
             try:
                 # Không giữ kết quả: text đã in dần qua `display` lúc stream.
