@@ -43,10 +43,33 @@ SANDBOX = ROOT / "sandbox"
 # Ngân sách token cho CẢ request. Con số này ở ĐÂY chứ không ở core/ vì chỉ
 # app.py mới biết đang chạy provider nào và cửa sổ của nó bao nhiêu.
 #
-# Để thấp hơn cửa sổ thật (128k của gpt-4o) rất nhiều, có chủ ý: phần dư là
-# chỗ cho output model sắp sinh ra, mà không request nào đếm trước được.
-# System prompt và tool schema thì KHÔNG còn nằm trong phần dư đó nữa — từ khi
-# session đọc `usage` của API, chúng được đo thật và nằm trong ngân sách này.
+# Đo thật trên deployment đang chạy (gpt-4.1), không phải đọc tài liệu:
+#   - prompt 150.008 token ĐI LỌT          -> cửa sổ không phải 128k
+#   - max_tokens=65536 bị từ chối: "supports at most 32768 completion tokens"
+#   - header x-ratelimit-limit-tokens: 250.000 token / 60 giây
+#
+# Nên thứ chặn thật không phải cửa sổ mà là hạn mức phút: một turn gồm nhiều
+# step, mỗi step gửi lại gần như cả ngữ cảnh, nên ~4 step ở 60k là chạm trần.
+# 60k là chọn theo hạn mức và tiền — KHÔNG phải để "chừa chỗ cho output": ta
+# không hề gửi `max_tokens`, và trần output của model là 32.768, không phải
+# phần dư 68k.
+#
+# Ràng buộc phải giữ khi đổi con số này — ba hằng số ở hai file khoá nhau:
+#
+#     MAX_TOKENS * (1 - _COMPACTION_THRESHOLD)  >  MAX_TOOL_RESULT_CHARS / 2.5
+#               12_000                          >            8_000
+#
+# Vế trái là khe hở từ ngưỡng nén tới ngân sách. Vế phải là bước nhảy lớn nhất
+# MỘT step có thể tạo ra: một tool result đã cắt ruột, ở mật độ xấu nhất mà
+# `_CHARS_PER_TOKEN` giả định. Khe hở hẹp hơn bước nhảy thì phép nén không kịp
+# nổ trước khi request vượt ngân sách, và tấm lưới duy nhất còn lại là bỏ trọn
+# turn cũ — tức là phép cắt mất mát nhất lại thành phép thường dùng. Đo thật:
+# một step `fetch_content` làm prompt_tokens nhảy +8.754.
+#
+# System prompt và tool schema KHÔNG nằm trong `_guess` (nó cho ra 0 cho cả
+# hai), nhưng cũng không bị bỏ quên: phép neo theo `usage` hấp thụ chúng ngay
+# sau response đầu tiên. Đo được ~550 token cho agent `research` — nên chỉ
+# request ĐẦU của một phiên mới là chưa tính, và chỉ lệch ~1% ngân sách.
 MAX_TOKENS = 60_000
 
 # Trần cho MỘT tool result khi chiếu lên model. Một trang web thật đo được ~25k
