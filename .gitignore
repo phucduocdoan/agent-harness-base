@@ -2,9 +2,14 @@
 .env
 .env.*
 
-# Repo gốc để đọc/đối chiếu: là repo public riêng
-# (github.com/deepseek-ai/deepseek-harness, MIT) và có .git riêng.
+# Repo để đọc/đối chiếu: mỗi cái là repo public riêng, có .git riêng.
+# Không commit vào đây — clone lại cạnh thư mục này nếu cần.
+# github.com/deepseek-ai/deepseek-harness (MIT)
 deepseek-harness/
+# github.com/openai/codex
+codex/
+# github.com/anthropics/claude-code
+claude-code/
 
 # Session log do harness ghi ra khi chạy `--session`.
 *.jsonl
