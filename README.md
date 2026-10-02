@@ -98,4 +98,6 @@ dừng ngay lúc khởi động chứ không lặng lẽ bỏ tool đi.
 Trong chat mode: `Ctrl-C` huỷ **turn** đang chạy và giữ session; `Ctrl-C` ở
 prompt trống, `Ctrl-D` hoặc `/quit` để thoát. `/compact` nén ngay, không đợi
 ngưỡng — nó bỏ qua đúng hai thứ (ngưỡng và cầu dao đếm số lần nén hỏng), còn
-vùng giữ nguyên văn thì vẫn giữ.
+vùng giữ nguyên văn thì vẫn giữ. `/context` cho biết còn bao nhiêu chỗ. Gõ sai
+tên lệnh thì báo tại chỗ chứ không lặng lẽ gửi cho model — một lệnh gõ nhầm mà
+lọt xuống `run_turn` là một lượt API bị tiêu cho câu hỏi không ai định hỏi.

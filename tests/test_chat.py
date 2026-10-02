@@ -194,6 +194,55 @@ async def test_nen_tu_dong_giua_turn_cung_khong_in_ra(capsys: Any) -> None:
     assert "đáp" in ra, "câu trả lời thật thì vẫn phải hiện"
 
 
+# --------------------------------------------------------- lệnh lạ và /context
+
+
+@pytest.mark.asyncio
+async def test_lenh_go_nham_khong_duoc_gui_cho_model(capsys: Any) -> None:
+    """Gõ sai tên lệnh thì báo tại chỗ, KHÔNG tiêu một lượt API.
+
+    Đo thật trước khi có chốt này: `/context` (lúc đó chưa là lệnh) đi thẳng
+    vào `run_turn`, model không hiểu nên đi gọi tool rồi trả lời lan man —
+    hai lượt API, tốn tiền, và không một dòng nào báo là đã gõ sai.
+    """
+    session = Session()
+    llm = FakeLLM([AssistantMessage(text="không được gọi")])
+    assert await chat(**_chat_kwargs(llm, session, "/khongcolenhnay", "/quit")) == 0
+
+    assert llm.requests == [], "lệnh lạ không được chạm tới model"
+    assert session.events == [], "và cũng không được ghi gì vào log"
+    assert "không có lệnh /khongcolenhnay" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_cau_hoi_bat_dau_bang_duong_dan_van_la_cau_hoi() -> None:
+    """`/etc/hosts là gì` là câu hỏi thật, không phải lệnh gõ nhầm.
+
+    Chốt lệnh lạ chỉ bắt dòng CHỈ GỒM một từ dạng `/chữ`. Bắt rộng hơn thì
+    chặn nhầm câu hỏi của người dùng — phiền hơn là cứ để nó đi.
+    """
+    session = Session()
+    llm = FakeLLM([AssistantMessage(text="đó là file hosts")])
+    assert await chat(**_chat_kwargs(llm, session, "/etc/hosts là gì", "/quit")) == 0
+
+    assert len(llm.requests) == 1, "câu hỏi thật thì phải tới được model"
+    assert [event["content"] for event in session.events
+            if event["type"] == "user"] == ["/etc/hosts là gì"]
+
+
+@pytest.mark.asyncio
+async def test_context_in_so_do_duoc_chu_khong_goi_model(capsys: Any) -> None:
+    """`/context` chỉ đọc session và in ra — không tốn lượt API nào."""
+    session = _duoi_nguong()
+    llm = FakeLLM([AssistantMessage(text="không được gọi")])
+    assert await chat(**_chat_kwargs(llm, session, "/context", "/quit")) == 0
+
+    assert llm.requests == [], "/context không được gọi model"
+    ra = capsys.readouterr().out
+    assert "to_messages() gửi model" in ra
+    assert f"ngân sách {session.max_tokens}" in ra, "phải nói ngân sách là bao nhiêu"
+
+
 # ------------------------------------------------------------------ multi-turn
 
 

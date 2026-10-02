@@ -8,6 +8,7 @@ point của session, nên mọi thứ user thấy đều là thứ đã thật s
 from __future__ import annotations
 
 import asyncio
+import re
 import signal
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -16,6 +17,9 @@ from mini_harness.cli.terminal import TerminalStream, read_line as _default_read
 from mini_harness.core.compaction import maybe_compact
 from mini_harness.core.loop import MaxStepsExceeded, run_turn
 from mini_harness.core.session import Session
+
+# Một dòng CHỈ GỒM một từ dạng `/chữ` thì chắc chắn là người dùng định gõ lệnh.
+_LENH = re.compile(r"/[a-zA-Z][a-zA-Z-]*")
 
 
 def echo_tool_activity(display: TerminalStream) -> Callable[[dict[str, Any]], None]:
@@ -54,15 +58,30 @@ def print_log(session: Session) -> None:
                 f"{call['name']}({call['arguments']})" for call in event["tool_calls"]
             )
         print(f"{index}. {event['type']}{mark}: {detail}")
-    # In cả số API ĐO được bên cạnh số message: đó là cách duy nhất nhìn ra bộ
-    # đoán trong session lệch bao nhiêu so với thực tế.
+    print_context(session)
+
+
+def print_context(session: Session) -> None:
+    """Còn bao nhiêu chỗ: số message, token ĐO được, ngân sách.
+
+    In số API đo chứ không in số ước lượng. Bộ đoán nằm trong Session và là
+    private — nó tồn tại để Session tự quyết định lúc nào nén, không phải để
+    báo cáo. `prompt_tokens` thì là sự thật, và đặt cạnh ngân sách là đủ trả
+    lời câu "sắp nén chưa".
+
+    Cái giá phải nói rõ: số đó là của request TRƯỚC, nên nó chưa tính những gì
+    vừa thêm vào log sau đó. Ngay sau một tool result quá khổ, con số này còn
+    thấp hơn thực tế khá nhiều.
+    """
     measured = [
         event["prompt_tokens"]
         for event in session.events
         if event["type"] == "assistant" and event.get("prompt_tokens")
     ]
     do_duoc = f", request cuối {measured[-1]} token (API đo)" if measured else ""
-    print(f"\n--- to_messages() gửi model: {len(session.to_messages())} message{do_duoc} ---")
+    ngan_sach = f" / ngân sách {session.max_tokens}" if session.max_tokens else ""
+    print(f"\n--- to_messages() gửi model: {len(session.to_messages())} message"
+          f"{do_duoc}{ngan_sach} ---")
 
 
 async def _compact_now(
@@ -164,6 +183,9 @@ async def chat(
                 return 0
             if not question:
                 continue
+            if question == "/context":
+                print_context(session)
+                continue
             if question == "/compact":
                 # Dùng lại y nguyên cơ chế huỷ của turn: /compact cũng gọi
                 # model, nên nó cũng phải Ctrl-C được.
@@ -177,6 +199,20 @@ async def chat(
                     print("(đã huỷ /compact — session vẫn giữ)")
                 finally:
                     current = None
+                continue
+
+            if _LENH.fullmatch(question):
+                # Gõ nhầm tên lệnh thì PHẢI báo, không được lặng lẽ gửi cho
+                # model. Đo thật: `/context` lúc chưa có lệnh này đi thẳng vào
+                # `run_turn`, model không hiểu nên đi gọi tool rồi trả lời lan
+                # man — mất hai lượt API, tốn tiền, và không một dòng nào báo
+                # là đã gõ sai.
+                #
+                # Chỉ bắt dòng CHỈ GỒM một từ dạng `/chữ`: một câu bắt đầu
+                # bằng đường dẫn (`/etc/hosts là gì`) vẫn là câu hỏi thật, và
+                # chặn nhầm nó thì phiền hơn là im lặng.
+                print(f"(không có lệnh {question} — "
+                      "chỉ có /context, /compact, /quit)")
                 continue
 
             current = asyncio.create_task(run_turn(
