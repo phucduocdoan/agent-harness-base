@@ -8,6 +8,7 @@ point của session, nên mọi thứ user thấy đều là thứ đã thật s
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import signal
 from collections.abc import Awaitable, Callable
@@ -21,9 +22,11 @@ from mini_harness.core.session import Session
 # Một dòng CHỈ GỒM một từ dạng `/chữ` thì chắc chắn là người dùng định gõ lệnh.
 _LENH = re.compile(r"/[a-zA-Z][a-zA-Z-]*")
 
-# `/task` một mình thì liệt kê; `/task <gì đó>` thì xem lại đúng một lần uỷ
-# quyền. Bắt cả phần đối số không phải số ở đây để câu lỗi còn trích lại được
-# đúng cái người dùng đã gõ, thay vì chỉ biết nói "không phải số".
+# Ba nghĩa trên cùng một lệnh: `/task` liệt kê, `/task N` xem lại lần thứ N,
+# `/task <agent> <việc>` uỷ quyền NGAY. Gộp làm một vì cả ba đều nói về cùng
+# một thứ — các lần uỷ quyền — và phân biệt được bằng chính đối số: không có
+# gì / toàn chữ số / còn lại. Tách thành `/task` và `/delegate` thì người dùng
+# phải nhớ hai tên cho một khái niệm.
 _TASK = re.compile(r"/task(?: (.+))?")
 
 
@@ -124,6 +127,53 @@ def print_tasks(runs: list[Session], arg: str | None) -> None:
     print_log(runs[int(arg) - 1])
 
 
+async def _delegate_now(delegate: Any, arg: str) -> None:
+    """`/task <agent> <việc>`: chính NGƯỜI DÙNG quyết định uỷ quyền, không phải model.
+
+    Vì sao cần cả hai lối. Model gọi tool được GIỮA turn, đúng lúc nó vừa nhận
+    ra việc này nên đưa đi chỗ khác — lệnh gõ tay không làm được điều đó, vì nó
+    chỉ gõ được lúc đang đứng ở prompt. Đổi lại, lệnh làm được thứ tool không
+    làm được: uỷ quyền mà KHÔNG phải thuyết phục model rằng nên uỷ quyền, và
+    uỷ quyền từ một agent không hề cầm `task` (`general`, `tutor`). Hai lối bù
+    cho nhau chứ không thay nhau.
+
+    Đi qua `registry.execute(name, json)` chứ không gọi thẳng `execute(args)`
+    của tool: đó là cùng CÁI CỬA mà model đi, nên kiểm tra tên agent (`enum`
+    trong schema), bọc exception thành kết quả đọc được, và trần step của con
+    đều dùng lại nguyên si. Dựng lại chúng ở đây là có hai bản để lệch nhau.
+
+    Kết quả CHỈ IN RA, không ghi vào session cha — nói thẳng cái giá: lượt sau
+    model cha không hề biết lần uỷ quyền này đã xảy ra. Đó là có chủ ý. Nhét
+    một cặp user/assistant giả vào log cha để "cho nó biết" là bịa ra một đoạn
+    hội thoại chưa từng xảy ra, và mọi thứ dựng lại từ log — resume, replay —
+    sẽ kể lại đúng đoạn bịa đó. Cần model cha biết thì hỏi nó, bằng một câu
+    hỏi thật.
+    """
+    if delegate is None:
+        print("(không uỷ quyền được: phiên này không có model thật — hội thoại "
+              "của sub-agent nằm ở log riêng, không nằm trong log đang phát lại)")
+        return
+    ten, _, viec = arg.partition(" ")
+    if not viec.strip():
+        # Không đoán hộ. `/task research` thiếu hẳn phần việc, mà một câu giao
+        # việc rỗng thì sub-agent chỉ có thể hỏi lại — nó không có ai để hỏi.
+        print(f"(/task {ten}: thiếu phần việc — `/task <agent> <việc>` để uỷ "
+              f"quyền, `/task N` để xem lại lần thứ N)")
+        return
+
+    result = await delegate.execute(
+        "task", json.dumps({"agent": ten, "task": viec.strip()})
+    )
+    if result.is_error:
+        # Text này model-facing (tiếng Anh) và ở đây nó lọt ra cho người đọc.
+        # Chấp nhận: tên agent sai thì chính câu lỗi của `enum` liệt kê ra các
+        # tên hợp lệ, tức là nó đã trả lời đúng câu người dùng đang hỏi. Chép
+        # lại danh sách đó ở đây là thêm một chỗ nữa phải nhớ cập nhật.
+        print(f"(uỷ quyền hỏng: {result.content})")
+        return
+    print(f"{ten}> {result.content}")
+
+
 async def _compact_now(
     *,
     summarizer: Any,
@@ -171,6 +221,7 @@ async def chat(
     summarizer: Any = None,
     read_line: Callable[[], Awaitable[str]] = _default_read_line,
     sub_runs: list[Session] | None = None,
+    delegate: Any = None,
 ) -> int:
     """Vòng ngoài: một lần lặp = một turn. Đây là vòng LỒNG đầu tiên của harness.
 
@@ -193,6 +244,12 @@ async def chat(
 
     `sub_runs` là list session con do `app.py` sở hữu và truyền vào — `/task`
     chỉ đọc nó để xem lại các lần uỷ quyền, không tự dựng ra session nào.
+
+    `delegate` là một registry chỉ chứa tool `task`, cho lệnh `/task <agent>
+    <việc>`. Nó TÁCH khỏi `tools` ở trên vì hai cái trả lời hai câu hỏi khác
+    nhau: `tools` là những gì MODEL được phép làm (và `general` thì không được
+    uỷ quyền), còn cái này là những gì NGƯỜI DÙNG gõ tay được. `None` nghĩa là
+    phiên này không uỷ quyền được — xem `_delegate_now`.
     """
     loop = asyncio.get_running_loop()
     summarizer = summarizer if summarizer is not None else llm
@@ -250,7 +307,24 @@ async def chat(
                 # Phải đứng TRƯỚC `_LENH` bên dưới: `_LENH` khớp bất kỳ
                 # `/chữ` nào, kể cả `/task`, nên đặt sau thì nhánh này không
                 # bao giờ tới lượt chạy — `/task` bị nuốt thành "lệnh lạ".
-                print_tasks(sub_runs or [], task_match.group(1))
+                arg = task_match.group(1)
+                if arg is None or arg.isdigit():
+                    print_tasks(sub_runs or [], arg)
+                    continue
+                # Còn lại là uỷ quyền, và nó GỌI MODEL — nên dùng lại đúng cơ
+                # chế huỷ của turn, như `/compact`. Một lượt sub-agent có thể
+                # đi mươi step; không Ctrl-C được thì người gõ chỉ còn cách
+                # giết cả process, mất luôn hội thoại của cha.
+                current = asyncio.create_task(_delegate_now(delegate, arg))
+                try:
+                    await current
+                except asyncio.CancelledError:
+                    # `run_turn` của CON đã tự vá log con xong trước khi nhả
+                    # exception. Log cha thì không có gì để vá: lệnh này chưa
+                    # bao giờ ghi vào đó.
+                    print("(đã huỷ /task — hội thoại của cha không đổi)")
+                finally:
+                    current = None
                 continue
 
             if _LENH.fullmatch(question):

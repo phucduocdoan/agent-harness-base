@@ -98,6 +98,17 @@ cha. Còn hạn mức token/phút là tài nguyên chung của cả deployment, 
 gọi model qua đúng client của cha nên vẫn trừ vào đó. Uỷ quyền nới cái thứ
 nhất, không nới cái thứ hai.
 
+Có **hai lối** vào cùng tính năng đó. Model tự gọi tool `task` — làm được
+giữa turn, đúng lúc nó vừa nhận ra nên đưa việc đi chỗ khác. Hoặc người dùng gõ
+`/task <agent> <việc>` — chỉ gõ được lúc đang đứng ở prompt, nhưng bù lại không
+phải thuyết phục model rằng nên uỷ quyền, và uỷ quyền được từ một agent không
+hề cầm `task` (`general`, `tutor`). Hai lối dùng chung một `ToolDefinition`
+dựng ở `build_task_tool`, nên phép chặn độ sâu không có đường đi vòng, và cùng
+chung sổ `sub_runs` nên số thứ tự trong `/task N` vẫn liên tục. Lối gõ tay
+**không** ghi gì vào hội thoại của cha: nhét một cặp user/assistant giả vào log
+để "cho model cha biết" là bịa ra đoạn hội thoại chưa từng xảy ra, rồi
+resume/replay sẽ kể lại đúng đoạn bịa đó.
+
 Độ sâu chặn bằng **dữ liệu**, không bằng biến đếm lúc chạy: `LEAD_DELEGATES`
 nói ai được giao việc, và `app.py` kiểm lúc khởi động rằng không ai trong số
 đó cầm `task` — nhìn hai dòng cạnh nhau là biết cây sâu tới đâu. Approver
@@ -130,6 +141,7 @@ prompt trống, `Ctrl-D` hoặc `/quit` để thoát. `/compact` nén ngay, khô
 ngưỡng — nó bỏ qua đúng hai thứ (ngưỡng và cầu dao đếm số lần nén hỏng), còn
 vùng giữ nguyên văn thì vẫn giữ. `/context` cho biết còn bao nhiêu chỗ. `/task` liệt kê các lần đã uỷ quyền,
 `/task N` in lại transcript của lần thứ N — đó là cách xem SAU khi con chạy
-xong; lúc nó đang chạy thì từng tool nó gọi đã được in thụt vào. Gõ sai
+xong; lúc nó đang chạy thì từng tool nó gọi đã được in thụt vào. `/task <agent>
+<việc>` thì uỷ quyền ngay, và Ctrl-C huỷ được nó như huỷ một turn. Gõ sai
 tên lệnh thì báo tại chỗ chứ không lặng lẽ gửi cho model — một lệnh gõ nhầm mà
 lọt xuống `run_turn` là một lượt API bị tiêu cho câu hỏi không ai định hỏi.

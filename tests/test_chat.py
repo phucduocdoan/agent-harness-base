@@ -23,6 +23,7 @@ from mini_harness.core.session import ABORTED_BEFORE_DISPATCH, Session
 from mini_harness.core.types import AssistantMessage, ToolCall
 from mini_harness.tools.calculator import calculator_tool
 from mini_harness.tools.registry import ToolRegistry, define_tool
+from mini_harness.tools.task import task_tool
 from fakes import FakeLLM, StreamingFakeLLM
 
 
@@ -320,6 +321,115 @@ async def test_task_ngoai_pham_vi_bao_dung(capsys: Any) -> None:
     )
     assert code == 0
     assert "(không có task 99 — hiện có 1..1)" in capsys.readouterr().out
+
+
+# ------------------------------------------------- /task <agent> <việc>: uỷ quyền tay
+# Lối thứ hai vào cùng một tính năng. Model gọi `task` được giữa turn, đúng lúc
+# nó nhận ra nên đưa việc đi chỗ khác; lệnh gõ tay thì không — bù lại nó uỷ
+# quyền được mà không phải thuyết phục model, và uỷ quyền được từ một agent
+# không hề cầm `task`. Các test dưới dùng `task_tool` THẬT, chỉ giả `spawn` và
+# model của con: thứ đang kiểm là chat nối đúng vào tool đó, không phải tool.
+
+
+def _delegate(dap_an: str, runs: list[Session]) -> ToolRegistry:
+    """Registry chỉ chứa `task` thật, với sub-agent giả trả lời sẵn một câu."""
+    def spawn(agent: str) -> tuple[Session, ToolRegistry, str]:
+        session = Session()
+        session.append({"type": "agent", "name": agent})
+        return session, ToolRegistry(), "system con"
+
+    registry = ToolRegistry()
+    registry.register(task_tool(
+        spawn=spawn, llm=FakeLLM([AssistantMessage(text=dap_an)]),
+        delegatable=("research",), runs=runs,
+    ))
+    return registry
+
+
+@pytest.mark.asyncio
+async def test_task_uy_quyen_ngay_va_khong_dung_vao_session_cha(capsys: Any) -> None:
+    """Câu giao việc tới đúng con, đáp án của con in ra, log cha KHÔNG đổi.
+
+    Vế cuối là phần dễ làm sai nhất và cũng là cái giá của thiết kế: lượt sau
+    model cha không biết lần uỷ quyền này đã xảy ra. Ghi một cặp user/assistant
+    giả vào log cha để "cho nó biết" là bịa ra đoạn hội thoại chưa từng xảy ra,
+    rồi resume/replay sẽ kể lại đúng đoạn bịa đó.
+    """
+    session = Session()
+    runs: list[Session] = []
+    llm_cha = FakeLLM([AssistantMessage(text="cha không được gọi")])
+
+    code = await chat(
+        **_chat_kwargs(llm_cha, session, "/task research tìm X giúp tôi", "/quit"),
+        sub_runs=runs, delegate=_delegate("đáp án của con", runs),
+    )
+
+    assert code == 0
+    assert llm_cha.requests == [], "lệnh này không được tốn một lượt của model cha"
+    assert "đáp án của con" in capsys.readouterr().out
+    assert session.events == [], "uỷ quyền tay không ghi gì vào session cha"
+    # Vào `runs` thì `/task` và `/task N` xem lại được — cùng một sổ, dù lần uỷ
+    # quyền do model hay do người dùng khởi xướng.
+    assert len(runs) == 1
+    assert any(event.get("content") == "tìm X giúp tôi" for event in runs[0].events)
+
+
+@pytest.mark.asyncio
+async def test_task_thieu_phan_viec_thi_bao_chu_khong_doan(capsys: Any) -> None:
+    """`/task research` mà không có việc: báo cú pháp, không spawn ai cả.
+
+    Không đoán hộ một câu giao việc rỗng: sub-agent nhận nó thì chỉ có thể hỏi
+    lại, mà nó không có ai để hỏi.
+    """
+    runs: list[Session] = []
+    llm_cha = FakeLLM([AssistantMessage(text="cha không được gọi")])
+
+    code = await chat(
+        **_chat_kwargs(llm_cha, Session(), "/task research", "/quit"),
+        sub_runs=runs, delegate=_delegate("không được chạy", runs),
+    )
+
+    assert code == 0
+    assert runs == [], "không được dựng session con nào"
+    assert "thiếu phần việc" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_task_ten_agent_sai_bi_chan_va_cau_loi_noi_ten_dung(capsys: Any) -> None:
+    """Tên agent sai bị `enum` của schema chặn — cùng cái cửa model đi.
+
+    Và câu lỗi đó tự liệt kê tên hợp lệ, nên chat không phải chép lại danh sách
+    agent lần thứ hai.
+    """
+    runs: list[Session] = []
+    llm_cha = FakeLLM([AssistantMessage(text="cha không được gọi")])
+
+    code = await chat(
+        **_chat_kwargs(llm_cha, Session(), "/task coder sửa Y", "/quit"),
+        sub_runs=runs, delegate=_delegate("không được chạy", runs),
+    )
+
+    assert code == 0
+    assert runs == [], "chặn phải xảy ra TRƯỚC khi spawn"
+    ra = capsys.readouterr().out
+    assert "uỷ quyền hỏng" in ra
+    assert "research" in ra, "câu lỗi phải cho biết tên nào mới đúng"
+
+
+@pytest.mark.asyncio
+async def test_task_khong_co_model_that_thi_noi_ro(capsys: Any) -> None:
+    """`--replay` không uỷ quyền được, và phải nói ra chứ không im lặng.
+
+    Hội thoại của con nằm ở log riêng (`run.task-1.jsonl`); log đang phát lại
+    chỉ chứa đúng câu trả lời cuối của nó, nên không có gì để phát lại.
+    """
+    code = await chat(**_chat_kwargs(
+        FakeLLM([AssistantMessage(text="cha không được gọi")]),
+        Session(), "/task research tìm X", "/quit",
+    ))
+
+    assert code == 0
+    assert "không uỷ quyền được" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio

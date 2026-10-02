@@ -33,7 +33,7 @@ from mini_harness.llm.replay import ReplayLLM
 from mini_harness.profiles import DEFAULT_AGENT, LEAD_DELEGATES, PROFILES
 from mini_harness.tools.calculator import calculator_tool
 from mini_harness.tools.read_spill import read_spill_tool
-from mini_harness.tools.registry import Approver, ToolRegistry
+from mini_harness.tools.registry import Approver, ToolDefinition, ToolRegistry
 from mini_harness.tools.task import Spawn, task_tool
 from mini_harness.tools.web_search import web_search_tool
 from mini_harness.tools.write_file import write_file_tool
@@ -92,6 +92,35 @@ PROVIDERS = {
     "--azure": AzureLLM,
     "--deepseek": DeepSeekLLM,
 }
+
+
+def build_task_tool(
+    *, spawn: Spawn, sub_llm: Any, sub_runs: list[Session],
+) -> ToolDefinition:
+    """Dựng tool `task` — dùng chung cho CẢ HAI lối uỷ quyền.
+
+    Hai lối: model tự gọi (tool nằm trong registry của `lead`), và người dùng
+    gõ `/task <agent> <việc>` (tool nằm trong một registry riêng chỉ có nó, vì
+    lệnh đó phải gõ được cả khi agent đang chạy không hề cầm `task`). Một hàm
+    cho cả hai để phép chặn độ sâu dưới đây không có đường nào đi vòng.
+
+    Hai lối thì dựng hai `ToolDefinition`, nhưng chúng không phải hai trạng
+    thái: cả hai đóng gói cùng một `spawn` và cùng một `sub_runs`, nên số thứ
+    tự trong `/task N` vẫn liên tục dù lần uỷ quyền đó do model hay do người
+    dùng khởi xướng.
+
+    Raises:
+        ValueError: một profile được uỷ quyền lại cầm `task`, tức là cây agent
+            sâu quá một tầng. Kiểm NGAY LÚC KHỞI ĐỘNG chứ không lúc chạy: cây
+            sâu bao nhiêu là tính chất đọc được từ dữ liệu, nên không có lý do
+            gì để nó chỉ lộ ra sau khi đã đốt vài lượt API.
+    """
+    nested = [name for name in LEAD_DELEGATES if "task" in PROFILES[name].tools]
+    if nested:
+        raise ValueError(f"profile được uỷ quyền không được cầm task: {nested}")
+    return task_tool(
+        spawn=spawn, llm=sub_llm, delegatable=LEAD_DELEGATES, runs=sub_runs,
+    )
 
 
 def build_tools(
@@ -163,14 +192,8 @@ def build_tools(
                 "tool task cần spawn/sub_llm/sub_runs — một lần uỷ quyền không "
                 "replay được, hãy chạy agent này với provider thật"
             )
-        # Chặn độ sâu, kiểm NGAY LÚC KHỞI ĐỘNG chứ không lúc chạy: cây agent
-        # sâu bao nhiêu là tính chất đọc được từ dữ liệu, nên không có lý do gì
-        # để nó chỉ lộ ra sau khi đã đốt vài lượt API.
-        nested = [name for name in LEAD_DELEGATES if "task" in PROFILES[name].tools]
-        if nested:
-            raise ValueError(f"profile được uỷ quyền không được cầm task: {nested}")
-        available["task"] = task_tool(
-            spawn=spawn, llm=sub_llm, delegatable=LEAD_DELEGATES, runs=sub_runs,
+        available["task"] = build_task_tool(
+            spawn=spawn, sub_llm=sub_llm, sub_runs=sub_runs,
         )
     unknown = sorted(set(allow) - set(available))
     if unknown:
@@ -378,19 +401,29 @@ async def main() -> int:
     # Sổ các lần uỷ quyền, sở hữu bởi file này: `task_tool` ghi vào, `/task`
     # đọc ra. Nhờ nó mà xem lại được cả khi chạy không có `--session`.
     sub_runs: list[Session] = []
+    spawn = build_spawn(
+        runs=sub_runs, approver=ask_terminal, parent_log=session_path,
+        # Con LUÔN echo, kể cả one-shot — khác cha, và khác có lý do: event của
+        # con không nằm trong `session.events` nên `print_log` ở cuối one-shot
+        # không thấy chúng. Không echo thì một lần uỷ quyền là một khoảng im
+        # lặng dài không giải thích.
+        on_event=echo_tool_activity(display, prefix="    "),
+    )
+    # Uỷ quyền do NGƯỜI DÙNG gõ (`/task <agent> <việc>`) đi qua registry riêng
+    # này, nên nó gõ được cả khi agent đang chạy không cầm `task` — đó là cả
+    # điểm của nó. `None` khi không có model thật: `summarizer` chỉ vắng mặt ở
+    # `--replay`, mà replay thì không uỷ quyền được (xem `build_tools`).
+    delegate: ToolRegistry | None = None
     try:
         tools = build_tools(
             profile.tools, ask_terminal, session,
-            spawn=build_spawn(
-                runs=sub_runs, approver=ask_terminal, parent_log=session_path,
-                # Con LUÔN echo, kể cả one-shot — khác cha, và khác có lý do:
-                # event của con không nằm trong `session.events` nên
-                # `print_log` ở cuối one-shot không thấy chúng. Không echo thì
-                # một lần uỷ quyền là một khoảng im lặng dài không giải thích.
-                on_event=echo_tool_activity(display, prefix="    "),
-            ),
-            sub_llm=summarizer, sub_runs=sub_runs,
+            spawn=spawn, sub_llm=summarizer, sub_runs=sub_runs,
         )
+        if summarizer is not None:
+            delegate = ToolRegistry()
+            delegate.register(build_task_tool(
+                spawn=spawn, sub_llm=summarizer, sub_runs=sub_runs,
+            ))
     except ValueError as error:
         # Thiếu credential là lỗi của người chạy, không phải bug — traceback ở
         # đây chỉ làm người đọc phải lội tìm dòng cuối.
@@ -403,7 +436,7 @@ async def main() -> int:
               "Ctrl-D hoặc /quit để thoát")
         return await chat(
             llm=llm, tools=tools, session=session, system=system, display=display,
-            summarizer=summarizer, sub_runs=sub_runs,
+            summarizer=summarizer, sub_runs=sub_runs, delegate=delegate,
         )
 
     print(f"user: {question}")
