@@ -214,8 +214,7 @@ class Session:
     def _for_model(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Chuỗi chính sách áp lên log trước khi chiếu. KHÔNG sửa `self.events`.
 
-        Ba bước, xếp theo mức độ mất mát TĂNG DẦN — đó là toàn bộ lý do của
-        thứ tự này:
+        Ba bước, xếp theo mức độ mất mát TĂNG DẦN:
 
           1. `_compacted`  — thay khúc đầu bằng bản tóm tắt model đã viết.
              Mất chi tiết, nhưng giữ lại ý; và tool result trong vùng đó vẫn
@@ -230,6 +229,15 @@ class Session:
         compaction-tool-result-pruner: "Trimming makes no model call and can
         clear token pressure on its own, so compaction may skip the summary
         entirely."
+
+        Nhưng thứ tự này KHÔNG phải luật chung. Nó là hệ quả của việc cả ba
+        phép cắt cùng xảy ra Ở ĐÂY, trên một log còn nguyên vẹn. Codex cắt
+        ruột tool result ngay lúc ghi vào history
+        (`context_manager/history.rs:566-572`), mất vĩnh viễn, xong trước khi
+        phép nén kịp được cân nhắc; và bước 3 của nó (`remove_first_item`)
+        chỉ tồn tại bên trong vòng retry của chính phép nén
+        (`compact.rs:313-325`). Ba phép cắt không cùng một chỗ thì không có
+        thứ tự nào để mà xếp. Xem `docs/codex_study_notes.md`.
         """
         return self._within_budget(self._pruned(self._compacted(events)))
 

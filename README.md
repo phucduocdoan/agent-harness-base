@@ -36,7 +36,7 @@ là **event log append-only**; message list gửi cho model là thứ *phái sin
 (`to_messages()`) — đó là cái làm resume, replay và **compaction** khả thi: cắt
 ngữ cảnh cho vừa cửa sổ model là cắt ở phép chiếu, log vẫn nguyên vẹn.
 
-Ba phép cắt, xếp theo mức mất mát **tăng dần** — thứ tự đó là toàn bộ thiết kế:
+Ba phép cắt, xếp theo mức mất mát **tăng dần**:
 
 1. **nén** — khúc đầu hội thoại được thay bằng một bản tóm tắt *do chính model
    viết* (`core/compaction.py`). Mất chi tiết, giữ lại ý. Đây là phép cắt duy
@@ -45,6 +45,21 @@ Ba phép cắt, xếp theo mức mất mát **tăng dần** — thứ tự đó 
 2. **cắt ruột tool result** quá khổ, giữ đầu + đuôi. Gần như không mất gì.
 3. **bỏ trọn turn cũ nhất.** Mất hẳn, không có đường về — nên nó là *lưới an
    toàn*, chỉ chạy khi hai bước trên đã làm hết sức mà vẫn chưa vừa.
+
+Thứ tự đó không phải luật của ngành. Nó là **hệ quả** của việc tách log khỏi
+phép chiếu, và chỉ phát biểu được vì cả ba phép cắt đều xảy ra ở phép chiếu.
+Codex không xếp được ba phép này, vì với nó câu hỏi không tồn tại: tool result
+bị cắt ruột ngay lúc *ghi vào history*, mất vĩnh viễn, xong trước khi phép nén
+kịp được cân nhắc; còn việc bỏ item cũ nhất chỉ chạy bên trong vòng retry của
+chính phép nén, khi request tóm tắt tự nó bị API trả `ContextWindowExceeded`.
+Ba phép cắt có thứ tự là thứ bạn **được** khi log còn nguyên, không phải thứ
+phải có (`docs/codex_study_notes.md`).
+
+Và ba không phải là hết. Claude Code có phép cắt thứ tư mà `mini_harness` không
+có: khi mô tả tool chiếm quá 10% cửa sổ, nó hoãn chính *định nghĩa tool* lại và
+bắt model đi tìm khi cần (`MCPSearch`). Phép đó cắt ở schema chứ không cắt ở
+message — một trục khác hẳn, và nó chỉ đáng làm khi số tool đã lớn
+(`docs/claude_code_study_notes.md`).
 
 Chỗ bị cắt để lại **locator**, và tool `read_spill` cầm locator đó đọc ngược vào
 log — nên cắt là *cất đi*, không phải *huỷ*. Kho spill không phải thứ dựng thêm:
