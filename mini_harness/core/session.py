@@ -303,6 +303,11 @@ class Session:
     # Phần đuôi giữ NGUYÊN VĂN, tính theo ngân sách. Tóm tắt là mất chi tiết,
     # mà chi tiết của mấy turn gần nhất là thứ model đang thật sự làm việc trên.
     _COMPACTION_RETAIN = 0.16
+    # Hỏng liên tiếp bao nhiêu lần thì thôi, không thử nữa. Không có con số này
+    # thì mỗi lượt lại tốn một lần gọi model cho đúng cái lỗi vừa rồi — hỏng vì
+    # model trả về rỗng hay vì provider từ chối thì lượt sau thường hỏng y hệt.
+    # Đối chiếu Claude Code 2.1.76: "stops retrying after 3 failed attempts".
+    _COMPACTION_MAX_FAILURES = 3
 
     def plan_compaction(self) -> CompactionPlan | None:
         """Có cần nén không, và nếu có thì nén tới đâu — trả `None` nếu chưa cần.
@@ -317,8 +322,16 @@ class Session:
         ruột (miễn phí, không gọi model) vốn đã đủ. Đối chiếu
         compaction-tool-result-pruner: "Trimming makes no model call and can
         clear token pressure on its own".
+
+        Hỏng quá `_COMPACTION_MAX_FAILURES` lần liên tiếp thì ngắt hẳn, không
+        thử nữa. Mất phép nén không làm chết hội thoại — `_within_budget` vẫn
+        đỡ, chỉ là từ đó trở đi mỗi lượt rụng một turn cũ thay vì được tóm tắt
+        lại. Đó là xuống cấp có kiểm soát, và nó hiện ra trong log qua chuỗi
+        event `compaction_failed`.
         """
         if self.max_tokens is None:
+            return None
+        if self._failures_since_compaction() >= self._COMPACTION_MAX_FAILURES:
             return None
         if self._estimate(self._pruned(self._compacted(self.events))) <= (
             self.max_tokens * self._COMPACTION_THRESHOLD
@@ -367,8 +380,8 @@ class Session:
         region = self._render(self._pruned(self._compacted(self.events[:covers])))
         return CompactionPlan(covers=covers, messages=region)
 
-    def apply_compaction(self, plan: CompactionPlan, summary: str) -> bool:
-        """Ghi bản tóm tắt vào log. Trả `False` nếu từ chối nó.
+    def apply_compaction(self, plan: CompactionPlan, summary: str) -> str | None:
+        """Ghi bản tóm tắt vào log. Trả LÝ DO nếu từ chối, `None` nếu nhận.
 
         Event mang text THÔ, chưa đóng khung. Khung `<compacted-summary>` và
         lời dẫn checkpoint được dựng ở phép chiếu (`_summary_event`), không
@@ -380,14 +393,38 @@ class Session:
         Từ chối bản tóm tắt KHÔNG nhỏ hơn vùng nó thay thế — nếu không, "nén"
         có thể làm phình ngữ cảnh ra, và lần sau lại nổ ngưỡng ngay. Đối chiếu
         compaction/: "rejects a summary that does not shrink its source".
+
+        Trả LÝ DO chứ không trả `False`, vì lý do là thứ duy nhất đi được tới
+        log: `core/compaction.py` ghi nó vào event `compaction_failed`, và từ
+        đó `--dump` đọc được tại sao. Một chữ `False` thì buộc bên gọi phải
+        đoán — mà nó không có số liệu để đoán đúng, số liệu nằm ở đây.
         """
         if not summary.strip():
-            return False
+            return "model returned an empty summary"
         truoc = self._guess(self._pruned(self._compacted(self.events[: plan.covers])))
-        if self._guess([_summary_event(summary)]) >= truoc:
-            return False
+        sau = self._guess([_summary_event(summary)])
+        if sau >= truoc:
+            return (
+                f"summary did not shrink its source: {sau} tokens replacing "
+                f"{truoc} tokens over {plan.covers} events"
+            )
         self.append({"type": "compaction", "content": summary, "covers": plan.covers})
-        return True
+        return None
+
+    def _failures_since_compaction(self) -> int:
+        """Số lần nén hỏng kể từ lần nén THÀNH CÔNG gần nhất.
+
+        Đọc ngược từ log chứ không giữ một biến đếm: log là nguồn sự thật duy
+        nhất ở đây, nên resume từ file cũng khôi phục luôn trạng thái cầu dao —
+        không phải nhớ thêm thứ gì ngoài log.
+        """
+        count = 0
+        for event in reversed(self.events):
+            if event["type"] == "compaction":
+                break
+            if event["type"] == "compaction_failed":
+                count += 1
+        return count
 
     def _compaction_start(self) -> int:
         """Log đã được nén tới event thứ mấy. 0 nếu chưa nén lần nào."""

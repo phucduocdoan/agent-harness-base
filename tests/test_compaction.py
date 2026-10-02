@@ -419,7 +419,7 @@ def test_khong_nen_lai_phan_da_nen() -> None:
                       max_tokens=1_500)
     dau = session.plan_compaction()
     assert dau is not None
-    assert session.apply_compaction(dau, "TÓM TẮT ĐẦU") is True
+    assert session.apply_compaction(dau, "TÓM TẮT ĐẦU") is None
 
     for event in _flat(*[_turn(tag, size=300) for tag in "fghij"]):
         session.append(event)
@@ -442,10 +442,10 @@ def test_summary_khong_lam_ngan_lai_thi_bi_tu_choi() -> None:
     plan = session.plan_compaction()
     assert plan is not None
 
-    assert session.apply_compaction(plan, "y" * 100_000) is False
-    assert session.apply_compaction(plan, "") is False
+    assert "did not shrink" in (session.apply_compaction(plan, "y" * 100_000) or "")
+    assert "empty summary" in (session.apply_compaction(plan, "") or "")
     assert all(event["type"] != "compaction" for event in session.events)
-    assert session.apply_compaction(plan, "tóm tắt ngắn gọn") is True
+    assert session.apply_compaction(plan, "tóm tắt ngắn gọn") is None
     assert session.events[-1]["type"] == "compaction"
 
 
@@ -457,7 +457,7 @@ def test_nen_xong_thi_request_nho_di_that() -> None:
 
     plan = session.plan_compaction()
     assert plan is not None
-    assert session.apply_compaction(plan, "tóm tắt a..d") is True
+    assert session.apply_compaction(plan, "tóm tắt a..d") is None
 
     sau = session._estimate(session._pruned(session._compacted(session.events)))
     assert sau < truoc
@@ -471,7 +471,7 @@ def test_resume_doc_lai_duoc_log_da_nen(tmp_path) -> None:
         goc.append(event)
     plan = goc.plan_compaction()
     assert plan is not None
-    assert goc.apply_compaction(plan, "tóm tắt a..d") is True
+    assert goc.apply_compaction(plan, "tóm tắt a..d") is None
 
     tiep = Session.resume(log_path, max_tokens=800)
     assert tiep.to_messages() == goc.to_messages()
@@ -489,7 +489,7 @@ def test_nen_xong_van_qua_nguong_nhung_khong_con_gi_de_nen() -> None:
                       max_tokens=1_500)
     plan = session.plan_compaction()
     assert plan is not None
-    assert session.apply_compaction(plan, "S" * 2_300) is True
+    assert session.apply_compaction(plan, "S" * 2_300) is None
 
     van_qua = session._estimate(session._pruned(session._compacted(session.events)))
     assert van_qua > 1_500 * Session._COMPACTION_THRESHOLD, "test này cần vẫn quá ngưỡng"
@@ -589,7 +589,79 @@ async def test_model_tra_rong_thi_tu_choi_va_ghi_lai() -> None:
     llm = FakeLLM([AssistantMessage(text="   ")])
 
     assert await maybe_compact(session=session, llm=llm, system="S", tools=[]) is False
-    assert session.events[-1]["type"] == "compaction_failed"
+    hong = session.events[-1]
+    assert hong["type"] == "compaction_failed"
+    assert "empty summary" in hong["content"], "lý do phải nói rõ hỏng ở đâu"
+
+
+@pytest.mark.asyncio
+async def test_hong_lien_tiep_du_nhieu_thi_thoi_khong_thu_nua() -> None:
+    """Cầu dao: hỏng vì provider thì lượt sau thường hỏng y hệt.
+
+    Không ngắt thì mỗi lượt tốn thêm một lần gọi model cho đúng cái lỗi vừa
+    rồi. Đối chiếu Claude Code 2.1.76: "stops retrying after 3 failed attempts".
+    """
+    class LLMHong:
+        def __init__(self) -> None:
+            self.lan_goi = 0
+
+        async def generate(self, **_: object) -> AssistantMessage:
+            self.lan_goi += 1
+            raise RuntimeError("502 Bad Gateway")
+
+    session = _dong_lon()
+    llm = LLMHong()
+    for _ in range(5):
+        assert await maybe_compact(session=session, llm=llm, system="S", tools=[]) is False
+
+    assert llm.lan_goi == Session._COMPACTION_MAX_FAILURES, "ngắt rồi thì không gọi nữa"
+    so_lan_hong = sum(e["type"] == "compaction_failed" for e in session.events)
+    assert so_lan_hong == Session._COMPACTION_MAX_FAILURES
+    # Ngắt phép nén KHÔNG làm chết hội thoại: lưới `_within_budget` vẫn đỡ.
+    assert session.to_messages()
+
+
+@pytest.mark.asyncio
+async def test_nen_duoc_mot_lan_thi_cau_dao_dong_lai() -> None:
+    """Đếm là đếm LIÊN TIẾP: một lần thành công xoá sạch nợ cũ.
+
+    Hỏng vì mạng chập thì không được tính dồn vào lần hỏng sáu tiếng sau đó.
+    """
+    class LLMChapChon:
+        def __init__(self) -> None:
+            self.lan_goi = 0
+
+        async def generate(self, **_: object) -> AssistantMessage:
+            self.lan_goi += 1
+            if self.lan_goi <= 2:
+                raise RuntimeError("502 Bad Gateway")
+            return AssistantMessage(text="checkpoint a..d")
+
+    session = _dong_lon()
+    llm = LLMChapChon()
+    assert await maybe_compact(session=session, llm=llm, system="S", tools=[]) is False
+    assert await maybe_compact(session=session, llm=llm, system="S", tools=[]) is False
+    assert await maybe_compact(session=session, llm=llm, system="S", tools=[]) is True
+
+    assert session._failures_since_compaction() == 0
+
+
+def test_cau_dao_song_sot_qua_resume(tmp_path) -> None:
+    """Trạng thái cầu dao đọc ra từ log, nên resume không reset nó.
+
+    Giữ bằng một biến đếm trong bộ nhớ thì resume xong là quên — hội thoại lại
+    lao vào đúng chuỗi lỗi vừa thoát ra.
+    """
+    log_path = tmp_path / "hong.jsonl"
+    goc = Session(log_path=log_path, max_tokens=1_500)
+    for event in _flat(*[_turn(tag, size=300) for tag in "abcde"]):
+        goc.append(event)
+    for _ in range(Session._COMPACTION_MAX_FAILURES):
+        goc.append({"type": "compaction_failed", "content": "502 Bad Gateway"})
+
+    tiep = Session.resume(log_path, max_tokens=1_500)
+    assert tiep._failures_since_compaction() == Session._COMPACTION_MAX_FAILURES
+    assert tiep.plan_compaction() is None
 
 
 @pytest.mark.asyncio

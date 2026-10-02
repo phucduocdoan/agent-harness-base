@@ -101,7 +101,7 @@ class CompactionSession(Protocol):
 
     def plan_compaction(self) -> CompactionPlan | None: ...
 
-    def apply_compaction(self, plan: CompactionPlan, summary: str) -> bool: ...
+    def apply_compaction(self, plan: CompactionPlan, summary: str) -> str | None: ...
 
 
 async def maybe_compact(
@@ -133,6 +133,11 @@ async def maybe_compact(
     listener đó — `_within_budget` là tấm lưới duy nhất, nên lưới phải luôn
     căng. Bỏ lưới ở đây nghĩa là tóm tắt hỏng -> request vượt cửa sổ -> API
     trả 400 -> chết cả turn.
+
+    Nhưng lưới không phải là lý do để thử mãi: hỏng liên tiếp đủ nhiều thì
+    `plan_compaction` tự ngắt (xem `_COMPACTION_MAX_FAILURES`). Cầu dao nằm
+    bên đó chứ không nằm đây, vì đếm được là phải đọc log — mà log là của
+    Session. File này chỉ ghi vào, không đếm.
     """
     plan = session.plan_compaction()
     if plan is None:
@@ -148,10 +153,11 @@ async def maybe_compact(
         _ghi_that_bai(session, f"{type(error).__name__}: {error}")
         return False
 
-    if session.apply_compaction(plan, reply.text):
+    tu_choi = session.apply_compaction(plan, reply.text)
+    if tu_choi is None:
         return True
-    # Session từ chối: text rỗng, hoặc bản tóm tắt không ngắn hơn vùng nó thay.
-    _ghi_that_bai(session, "model did not return a usable summary")
+    # Lý do do Session viết, không phải file này đoán: chỉ bên đó mới có con số.
+    _ghi_that_bai(session, tu_choi)
     return False
 
 
