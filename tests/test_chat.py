@@ -243,6 +243,114 @@ async def test_context_in_so_do_duoc_chu_khong_goi_model(capsys: Any) -> None:
     assert f"ngân sách {session.max_tokens}" in ra, "phải nói ngân sách là bao nhiêu"
 
 
+# ------------------------------------------------------------------- /task
+
+
+def _sub_session(ten: str, cau: str, *them: dict[str, Any]) -> Session:
+    """Session con tối giản: đủ event để `/task` đọc ra tên agent và câu task.
+
+    `*them` là các event phụ, chỉ để đẩy số lượng event lên — kiểm tra đúng
+    cột "N event" trong dòng liệt kê.
+    """
+    session = Session()
+    session.append({"type": "agent", "name": ten})
+    session.append({"type": "user", "content": cau})
+    for event in them:
+        session.append(event)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_task_rong_khong_goi_model(capsys: Any) -> None:
+    """Chưa uỷ quyền lần nào thì nói rõ, và `/task` không tốn lượt API nào."""
+    session = Session()
+    llm = FakeLLM([AssistantMessage(text="không được gọi")])
+    assert await chat(**_chat_kwargs(llm, session, "/task", "/quit")) == 0
+
+    assert llm.requests == [], "/task không được gọi model"
+    assert "(chưa uỷ quyền cho sub-agent lần nào)" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_task_liet_ke_du_so_dong(capsys: Any) -> None:
+    """`/task` liệt kê đúng từng lần uỷ quyền; tên và câu task đọc từ event con."""
+    session = Session()
+    runs = [_sub_session("research", "tìm X"), _sub_session("coder", "sửa Y")]
+    llm = FakeLLM([AssistantMessage(text="không được gọi")])
+    code = await chat(
+        **_chat_kwargs(llm, session, "/task", "/quit"), sub_runs=runs,
+    )
+    assert code == 0
+
+    ra = capsys.readouterr().out
+    assert '1. research · "tìm X" · 2 event' in ra
+    assert '2. coder · "sửa Y" · 2 event' in ra
+
+
+@pytest.mark.asyncio
+async def test_task_n_in_transcript_dung_session_con(capsys: Any) -> None:
+    """`/task N` in transcript của đúng lần thứ N, bằng `print_log` thật."""
+    session = Session()
+    runs = [
+        _sub_session("research", "tìm X"),
+        _sub_session("coder", "sửa Y", {
+            "type": "assistant", "content": "xong rồi", "tool_calls": [],
+        }),
+    ]
+    llm = FakeLLM([AssistantMessage(text="không được gọi")])
+    code = await chat(
+        **_chat_kwargs(llm, session, "/task 2", "/quit"), sub_runs=runs,
+    )
+    assert code == 0
+
+    ra = capsys.readouterr().out
+    assert "session.events (log thô)" in ra, "phải đi qua print_log, không tự in riêng"
+    assert "xong rồi" in ra
+    assert '"tìm X"' not in ra, "task 2 không được lẫn nội dung của task 1"
+
+
+@pytest.mark.asyncio
+async def test_task_ngoai_pham_vi_bao_dung(capsys: Any) -> None:
+    """Số không tồn tại thì nói rõ phạm vi hợp lệ, không im lặng và không crash."""
+    session = Session()
+    runs = [_sub_session("research", "tìm X")]
+    llm = FakeLLM([AssistantMessage(text="không được gọi")])
+    code = await chat(
+        **_chat_kwargs(llm, session, "/task 99", "/quit"), sub_runs=runs,
+    )
+    assert code == 0
+    assert "(không có task 99 — hiện có 1..1)" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_task_co_so_nhung_chua_uy_quyen_lan_nao(capsys: Any) -> None:
+    """Chưa có lần nào thì trả lời "chưa có", kể cả khi gõ kèm số.
+
+    Nhánh phạm vi chạy trước thì câu trả lời là `hiện có 1..0` — một khoảng
+    rỗng viết dưới dạng một khoảng, và nó trả lời nhầm câu hỏi: người gõ cần
+    biết là chưa có gì để xem, không phải là họ gõ sai số.
+    """
+    session = Session()
+    llm = FakeLLM([AssistantMessage(text="không được gọi")])
+    assert await chat(**_chat_kwargs(llm, session, "/task 3", "/quit")) == 0
+
+    ra = capsys.readouterr().out
+    assert "(chưa uỷ quyền cho sub-agent lần nào)" in ra
+    assert "1..0" not in ra
+
+
+@pytest.mark.asyncio
+async def test_task_khong_roi_vao_nhanh_lenh_la(capsys: Any) -> None:
+    """Đây chính là con bug SPEC canh: đặt nhánh `/task` sau `_LENH` thì nó bị
+    nuốt thành "lệnh lạ" — test này phải đỏ nếu thứ tự bị đảo lại.
+    """
+    session = Session()
+    llm = FakeLLM([AssistantMessage(text="không được gọi")])
+    assert await chat(**_chat_kwargs(llm, session, "/task", "/quit")) == 0
+
+    assert "không có lệnh" not in capsys.readouterr().out
+
+
 # ------------------------------------------------------------------ multi-turn
 
 

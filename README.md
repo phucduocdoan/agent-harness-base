@@ -24,9 +24,10 @@ mini_harness/
   llm/     stream.py  deepseek.py  azure.py  # chỗ duy nhất biết wire format
   tools/   registry.py  calculator.py  write_file.py  web_search.py
            read_spill.py                              # đọc / tìm trong khúc đã cắt
+           task.py                                    # giao việc cho sub-agent
   cli/     terminal.py  chat.py              # chỗ duy nhất in ra màn hình
   context.py                                 # giờ, workspace — chạm thế giới thật
-  profiles.py                                # general, tutor, research
+  profiles.py                                # general, tutor, research, lead
   app.py                                     # chỗ duy nhất biết tất cả những thứ trên
 ```
 
@@ -77,6 +78,34 @@ Một **loại agent** (`general`, `tutor`, …) là *dữ liệu*, không phả
 persona + tập tool. Thêm agent mới không sửa dòng nào trong `core/loop.py` hay
 `tools/registry.py` — đó là phép thử của các seam phía trên.
 
+### Uỷ quyền: trục thứ hai
+
+Cả ba phép cắt ở trên — kể cả phép thứ tư của Claude Code — đều chữa một log
+**đã** phình. Tool `task` đi trục khác: việc giao cho sub-agent chạy trong một
+`Session` riêng của nó, và cha chỉ nhận lại đúng đoạn text cuối. Không phải
+"cắt bớt cái đã to", mà là "đừng để nó to lên ở chỗ cha".
+
+Đo thật, một câu hỏi buộc `lead` giao việc tra cứu cho `research`: con đi 4
+step, đọc 26.435 ký tự tool result, đốt 13.984 token; cha nhận lại 3.113 ký tự
+và request cuối của cha được API đo **1.318 token**. Dựng lại phản-thực bằng
+chính bộ ước lượng của `Session` — cùng hội thoại đó nhưng cha tự làm lấy —
+cửa sổ cha là ~13.770 thay vì ~2.647: **5,2 lần**. Và tỷ lệ đó còn mở ra theo
+mỗi step con đi thêm, trong khi cha đứng yên.
+
+Hai thứ dễ gộp nhầm vì cùng đo bằng "token". Cửa sổ ngữ cảnh tính theo **từng
+request**, nên con có một ngân sách MỚI chứ không phải một nửa ngân sách của
+cha. Còn hạn mức token/phút là tài nguyên chung của cả deployment, và con vẫn
+gọi model qua đúng client của cha nên vẫn trừ vào đó. Uỷ quyền nới cái thứ
+nhất, không nới cái thứ hai.
+
+Độ sâu chặn bằng **dữ liệu**, không bằng biến đếm lúc chạy: `LEAD_DELEGATES`
+nói ai được giao việc, và `app.py` kiểm lúc khởi động rằng không ai trong số
+đó cầm `task` — nhìn hai dòng cạnh nhau là biết cây sâu tới đâu. Approver
+truyền thẳng xuống con, không nới ra: uỷ quyền không được là đường leo thang
+quyền. Và `--replay --agent lead` **dừng ngay** chứ không chạy thử: hội thoại
+của con nằm ở log riêng (`run.task-1.jsonl`), còn log đang phát lại chỉ chứa
+đúng câu trả lời cuối của nó.
+
 ### Chạy
 
 ```bash
@@ -86,6 +115,7 @@ python3 -m mini_harness --azure --session run.jsonl # ghi/resume event log
 python3 -m mini_harness --replay run.jsonl          # phát lại log cũ, không cần API key
 python3 -m mini_harness --azure --agent tutor       # đổi persona + tập tool
 python3 -m mini_harness --azure --agent research    # cần TAVILY_API_KEY
+python3 -m mini_harness --azure --agent lead        # giao việc cho sub-agent
 python3 -m pytest -q
 ```
 
@@ -98,6 +128,8 @@ dừng ngay lúc khởi động chứ không lặng lẽ bỏ tool đi.
 Trong chat mode: `Ctrl-C` huỷ **turn** đang chạy và giữ session; `Ctrl-C` ở
 prompt trống, `Ctrl-D` hoặc `/quit` để thoát. `/compact` nén ngay, không đợi
 ngưỡng — nó bỏ qua đúng hai thứ (ngưỡng và cầu dao đếm số lần nén hỏng), còn
-vùng giữ nguyên văn thì vẫn giữ. `/context` cho biết còn bao nhiêu chỗ. Gõ sai
+vùng giữ nguyên văn thì vẫn giữ. `/context` cho biết còn bao nhiêu chỗ. `/task` liệt kê các lần đã uỷ quyền,
+`/task N` in lại transcript của lần thứ N — đó là cách xem SAU khi con chạy
+xong; lúc nó đang chạy thì từng tool nó gọi đã được in thụt vào. Gõ sai
 tên lệnh thì báo tại chỗ chứ không lặng lẽ gửi cho model — một lệnh gõ nhầm mà
 lọt xuống `run_turn` là một lượt API bị tiêu cho câu hỏi không ai định hỏi.

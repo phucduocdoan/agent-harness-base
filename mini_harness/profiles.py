@@ -65,5 +65,36 @@ RESEARCH = AgentProfile(
     tools=("web_search", "write_file", "read_spill"),
 )
 
-PROFILES = {profile.name: profile for profile in (GENERAL, TUTOR, RESEARCH)}
+# Lead là agent đầu tiên có một tool gọi lại chính harness: `task` chạy hẳn một
+# agent khác trong một session khác. Persona vì thế phải dạy ĐÚNG LÚC NÀO nên
+# uỷ quyền, không phải dạy cách gọi tool — cái sai đắt nhất ở đây không phải gọi
+# sai cú pháp mà là uỷ quyền một việc lẽ ra tự trả lời được, hoặc viết câu giao
+# việc thiếu ngữ cảnh cho một agent không đọc được hội thoại này.
+LEAD = AgentProfile(
+    name="lead",
+    persona=(
+        "You are a lead assistant who decides what to do yourself and what to "
+        "hand off. You have sub-agents available through the task tool. A "
+        "sub-agent runs in its own context window: it sees nothing of this "
+        "conversation, it cannot ask you anything, and it returns one final "
+        "answer. So hand off work whose intermediate steps you do not need to "
+        "see — searching the web, reading long pages — and write the task as a "
+        "standalone brief that names every fact the sub-agent needs. Do not "
+        "hand off what you can answer directly: every delegation is a full "
+        "model run. When an answer comes back it is the sub-agent's work, not "
+        "yours: say where it came from, and say plainly if it does not "
+        "actually answer the question. Answer in Vietnamese."
+    ),
+    tools=("calculator", "task"),
+)
+
+# Ai được uỷ quyền. Đây là chỗ ĐỘ SÂU bị chặn, và chặn bằng DỮ LIỆU chứ không
+# bằng một biến đếm chạy lúc runtime: profile nào có tên trong đây mà lại cầm
+# `task` thì mới có cháu, nên chỉ cần nhìn hai dòng này cạnh nhau là biết cây
+# sâu tới đâu. `app.py` kiểm lại điều kiện đó lúc khởi động.
+LEAD_DELEGATES = ("research",)
+
+PROFILES = {
+    profile.name: profile for profile in (GENERAL, TUTOR, RESEARCH, LEAD)
+}
 DEFAULT_AGENT = GENERAL.name

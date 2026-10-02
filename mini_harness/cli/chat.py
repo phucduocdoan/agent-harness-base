@@ -21,8 +21,15 @@ from mini_harness.core.session import Session
 # Một dòng CHỈ GỒM một từ dạng `/chữ` thì chắc chắn là người dùng định gõ lệnh.
 _LENH = re.compile(r"/[a-zA-Z][a-zA-Z-]*")
 
+# `/task` một mình thì liệt kê; `/task <gì đó>` thì xem lại đúng một lần uỷ
+# quyền. Bắt cả phần đối số không phải số ở đây để câu lỗi còn trích lại được
+# đúng cái người dùng đã gõ, thay vì chỉ biết nói "không phải số".
+_TASK = re.compile(r"/task(?: (.+))?")
 
-def echo_tool_activity(display: TerminalStream) -> Callable[[dict[str, Any]], None]:
+
+def echo_tool_activity(
+    display: TerminalStream, prefix: str = "",
+) -> Callable[[dict[str, Any]], None]:
     """Listener của Session: cho user thấy tool nào vừa chạy, ngay lúc nó chạy.
 
     KHÔNG phải debug output. Một step chỉ gọi tool thì `reply.text` rỗng, tức là
@@ -32,18 +39,20 @@ def echo_tool_activity(display: TerminalStream) -> Callable[[dict[str, Any]], No
     Args:
         display: stream đang in text của model, để đóng dòng dở trước khi chèn
             một dòng tool vào giữa.
+        prefix: chèn trước mỗi dòng in ra, để phân biệt hoạt động của sub-agent
+            với của agent chính khi cả hai cùng in ra một màn hình.
     """
     def echo(event: dict[str, Any]) -> None:
         display.close()
         for call in event.get("tool_calls", ()):
-            print(f"  → {call['name']}({call['arguments']})")
+            print(f"{prefix}  → {call['name']}({call['arguments']})")
         if event["type"] == "tool_result":
             # Một dòng đầu là đủ để biết chạy được hay không; nội dung đầy đủ
             # nằm trong log. Đây là chỗ duy nhất `is_error` được dùng để
             # HIỂN THỊ — nó vẫn không bao giờ lên wire.
             head = event["content"].splitlines()[0] if event["content"] else ""
             mark = "✗" if event.get("is_error") else "←"
-            print(f"  {mark} {head[:160]}")
+            print(f"{prefix}  {mark} {head[:160]}")
     return echo
 
 
@@ -82,6 +91,37 @@ def print_context(session: Session) -> None:
     ngan_sach = f" / ngân sách {session.max_tokens}" if session.max_tokens else ""
     print(f"\n--- to_messages() gửi model: {len(session.to_messages())} message"
           f"{do_duoc}{ngan_sach} ---")
+
+
+def print_tasks(runs: list[Session], arg: str | None) -> None:
+    """`/task`: liệt kê các lần uỷ quyền, hoặc in lại transcript của một lần.
+
+    Session con là nguồn sự thật duy nhất ở đây: tên agent và câu task được đọc
+    NGƯỢC ra từ chính event của nó, không phải từ một sổ ghi song song do lệnh
+    này tự giữ. Hai bản ghi cùng mô tả một thứ là hai chỗ để lệch nhau.
+
+    Đây là cách xem SAU KHI con chạy xong. Lúc nó đang chạy thì đã có
+    `echo_tool_activity` với `prefix` in từng tool nó gọi — xem trực tiếp giữa
+    chừng cần một kênh nhập liệu khác hẳn (raw mode, reader sống song song với
+    turn), mà `cli/terminal.py` chưa có và cũng chưa cần có.
+
+    Chưa uỷ quyền lần nào thì nói đúng câu đó, kể cả khi người dùng gõ kèm số:
+    `(không có task 3 — hiện có 1..0)` vừa sai ngữ pháp vừa trả lời nhầm câu
+    hỏi, vì cái người gõ cần biết là chưa có gì để xem.
+    """
+    if not runs:
+        print("(chưa uỷ quyền cho sub-agent lần nào)")
+        return
+    if arg is None:
+        for thu_tu, sub in enumerate(runs, start=1):
+            ten = next((e["name"] for e in sub.events if e["type"] == "agent"), "?")
+            cau = next((e["content"] for e in sub.events if e["type"] == "user"), "?")
+            print(f'{thu_tu}. {ten} · "{cau}" · {len(sub.events)} event')
+        return
+    if not arg.isdigit() or not 1 <= int(arg) <= len(runs):
+        print(f"(không có task {arg} — hiện có 1..{len(runs)})")
+        return
+    print_log(runs[int(arg) - 1])
 
 
 async def _compact_now(
@@ -130,6 +170,7 @@ async def chat(
     display: TerminalStream,
     summarizer: Any = None,
     read_line: Callable[[], Awaitable[str]] = _default_read_line,
+    sub_runs: list[Session] | None = None,
 ) -> int:
     """Vòng ngoài: một lần lặp = một turn. Đây là vòng LỒNG đầu tiên của harness.
 
@@ -149,6 +190,9 @@ async def chat(
 
     `summarizer` là model dùng cho phép nén — xem `run_turn`. Nó đi qua đây chứ
     không được dựng ở đây, vì `cli/` không biết provider nào tồn tại.
+
+    `sub_runs` là list session con do `app.py` sở hữu và truyền vào — `/task`
+    chỉ đọc nó để xem lại các lần uỷ quyền, không tự dựng ra session nào.
     """
     loop = asyncio.get_running_loop()
     summarizer = summarizer if summarizer is not None else llm
@@ -201,6 +245,14 @@ async def chat(
                     current = None
                 continue
 
+            task_match = _TASK.fullmatch(question)
+            if task_match:
+                # Phải đứng TRƯỚC `_LENH` bên dưới: `_LENH` khớp bất kỳ
+                # `/chữ` nào, kể cả `/task`, nên đặt sau thì nhánh này không
+                # bao giờ tới lượt chạy — `/task` bị nuốt thành "lệnh lạ".
+                print_tasks(sub_runs or [], task_match.group(1))
+                continue
+
             if _LENH.fullmatch(question):
                 # Gõ nhầm tên lệnh thì PHẢI báo, không được lặng lẽ gửi cho
                 # model. Đo thật: `/context` lúc chưa có lệnh này đi thẳng vào
@@ -212,7 +264,7 @@ async def chat(
                 # bằng đường dẫn (`/etc/hosts là gì`) vẫn là câu hỏi thật, và
                 # chặn nhầm nó thì phiền hơn là im lặng.
                 print(f"(không có lệnh {question} — "
-                      "chỉ có /context, /compact, /quit)")
+                      "chỉ có /context, /compact, /task, /quit)")
                 continue
 
             current = asyncio.create_task(run_turn(

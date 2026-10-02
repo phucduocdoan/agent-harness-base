@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -29,10 +30,11 @@ from mini_harness.core.session import Session
 from mini_harness.llm.azure import AzureLLM
 from mini_harness.llm.deepseek import DeepSeekLLM
 from mini_harness.llm.replay import ReplayLLM
-from mini_harness.profiles import DEFAULT_AGENT, PROFILES
+from mini_harness.profiles import DEFAULT_AGENT, LEAD_DELEGATES, PROFILES
 from mini_harness.tools.calculator import calculator_tool
 from mini_harness.tools.read_spill import read_spill_tool
 from mini_harness.tools.registry import Approver, ToolRegistry
+from mini_harness.tools.task import Spawn, task_tool
 from mini_harness.tools.web_search import web_search_tool
 from mini_harness.tools.write_file import write_file_tool
 
@@ -96,6 +98,9 @@ def build_tools(
     allow: tuple[str, ...],
     approver: Approver | None = None,
     session: Session | None = None,
+    spawn: Spawn | None = None,
+    sub_llm: Any = None,
+    sub_runs: list[Session] | None = None,
 ) -> ToolRegistry:
     """Đăng ký tool mà profile cho phép. Liệt kê tay, KHÔNG auto-discover.
 
@@ -144,6 +149,29 @@ def build_tools(
         if session is None:
             raise ValueError("tool read_spill cần session; build_tools(session=...)")
         available["read_spill"] = read_spill_tool(session)
+    # `task` là tool đầu tiên gọi ngược lại chính wiring này: nó cần dựng được
+    # một agent khác. Ba thứ nó thiếu đều là thứ chỉ `main()` cầm — cùng dạng
+    # với TAVILY_API_KEY và `session` ở trên, và cũng DỪNG chứ không bỏ qua.
+    #
+    # Đường duy nhất tới nhánh này trong thực tế là `--replay --agent lead`:
+    # replay không có `summarizer` vì nó không gọi model thật. Và nó dừng ở đây
+    # là đúng — một lần uỷ quyền KHÔNG replay được, vì hội thoại của con nằm ở
+    # log khác, còn log đang phát lại chỉ chứa câu trả lời cuối của nó.
+    if "task" in allow:
+        if spawn is None or sub_llm is None or sub_runs is None:
+            raise ValueError(
+                "tool task cần spawn/sub_llm/sub_runs — một lần uỷ quyền không "
+                "replay được, hãy chạy agent này với provider thật"
+            )
+        # Chặn độ sâu, kiểm NGAY LÚC KHỞI ĐỘNG chứ không lúc chạy: cây agent
+        # sâu bao nhiêu là tính chất đọc được từ dữ liệu, nên không có lý do gì
+        # để nó chỉ lộ ra sau khi đã đốt vài lượt API.
+        nested = [name for name in LEAD_DELEGATES if "task" in PROFILES[name].tools]
+        if nested:
+            raise ValueError(f"profile được uỷ quyền không được cầm task: {nested}")
+        available["task"] = task_tool(
+            spawn=spawn, llm=sub_llm, delegatable=LEAD_DELEGATES, runs=sub_runs,
+        )
     unknown = sorted(set(allow) - set(available))
     if unknown:
         raise ValueError(f"profile gọi tool không có: {unknown}")
@@ -168,6 +196,65 @@ def build_system_prompt(profile: AgentProfile) -> str:
         time_context(),
         workspace_context(SANDBOX) if "write_file" in profile.tools else None,
     )
+
+
+def _sub_log(parent_log: Path | None, thu_tu: int) -> Path | None:
+    """Log của con nằm CẠNH log của cha: `run.jsonl` -> `run.task-1.jsonl`.
+
+    File riêng chứ không trộn vào log cha, vì hai session là hai hội thoại
+    riêng: trộn vào thì `Session.resume` sẽ đọc cả hai thành một, và phép chiếu
+    sẽ gửi cho model một cuộc nói chuyện chưa từng xảy ra.
+    """
+    if parent_log is None:
+        return None
+    return parent_log.with_suffix(f".task-{thu_tu}{parent_log.suffix}")
+
+
+def build_spawn(
+    *,
+    runs: list[Session],
+    approver: Approver | None = None,
+    parent_log: Path | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+) -> Spawn:
+    """Dựng một agent con đầy đủ: session riêng, tool riêng, system prompt riêng.
+
+    Đây là chỗ phát biểu nội dung của cả tính năng, nên nói thẳng ra: con có
+    NGÂN SÁCH RIÊNG, không chia phần với cha. Cửa sổ ngữ cảnh là tài nguyên
+    theo từng REQUEST, nên hai session chạy nối nhau không hề cộng dồn — con
+    đốt 40k token mà cha chỉ nhận về một tool result vài nghìn ký tự.
+
+    Thứ KHÔNG rộng ra là hạn mức token/phút: nó là tài nguyên dùng chung của cả
+    deployment (xem `MAX_TOKENS`). Hai thứ này rất dễ bị lẫn làm một, và lẫn
+    thì sẽ tưởng sub-agent là cách mua thêm hạn mức.
+
+    Hàm này nằm ở `app.py` chứ không ở `tools/task.py` vì mọi thứ nó quyết định
+    đều là quyết định của wiring: ngân sách nào, log ở đâu, ai duyệt tool, màn
+    hình nào. `tools/task.py` chỉ nhận lại một callable và gọi `run_turn`.
+    """
+    def spawn(name: str) -> tuple[Session, ToolRegistry, str]:
+        profile = PROFILES[name]
+        # `len(runs) + 1` chứ không phải một biến đếm riêng: `task_tool` append
+        # vào `runs` ngay sau khi hàm này trả về, nên số thứ tự ở đây và số
+        # người dùng gõ trong `/task N` BẮT BUỘC khớp nhau. Suy ra từ cùng một
+        # list là cách duy nhất bảo đảm điều đó mà không cần nhớ.
+        session = Session(
+            log_path=_sub_log(parent_log, len(runs) + 1),
+            max_tokens=MAX_TOKENS,
+            max_tool_result_chars=MAX_TOOL_RESULT_CHARS,
+        )
+        session.append({"type": "agent", "name": name})
+        # Gắn listener SAU event `agent`: event đó là bookkeeping của harness,
+        # không phải việc con vừa làm, nên nó không có gì để hiển thị.
+        session.on_event = on_event
+        # Approver truyền thẳng xuống, không nới ra: một tool cần duyệt ở cha
+        # thì ở con vẫn cần duyệt. Uỷ quyền KHÔNG được là đường leo thang quyền.
+        return (
+            session,
+            build_tools(profile.tools, approver, session),
+            build_system_prompt(profile),
+        )
+    return spawn
 
 
 async def main() -> int:
@@ -288,8 +375,22 @@ async def main() -> int:
         print(f"(log tạo bởi agent {recorded!r}, đang chạy {profile.name!r})")
 
     system = build_system_prompt(profile)
+    # Sổ các lần uỷ quyền, sở hữu bởi file này: `task_tool` ghi vào, `/task`
+    # đọc ra. Nhờ nó mà xem lại được cả khi chạy không có `--session`.
+    sub_runs: list[Session] = []
     try:
-        tools = build_tools(profile.tools, ask_terminal, session)
+        tools = build_tools(
+            profile.tools, ask_terminal, session,
+            spawn=build_spawn(
+                runs=sub_runs, approver=ask_terminal, parent_log=session_path,
+                # Con LUÔN echo, kể cả one-shot — khác cha, và khác có lý do:
+                # event của con không nằm trong `session.events` nên
+                # `print_log` ở cuối one-shot không thấy chúng. Không echo thì
+                # một lần uỷ quyền là một khoảng im lặng dài không giải thích.
+                on_event=echo_tool_activity(display, prefix="    "),
+            ),
+            sub_llm=summarizer, sub_runs=sub_runs,
+        )
     except ValueError as error:
         # Thiếu credential là lỗi của người chạy, không phải bug — traceback ở
         # đây chỉ làm người đọc phải lội tìm dòng cuối.
@@ -302,7 +403,7 @@ async def main() -> int:
               "Ctrl-D hoặc /quit để thoát")
         return await chat(
             llm=llm, tools=tools, session=session, system=system, display=display,
-            summarizer=summarizer,
+            summarizer=summarizer, sub_runs=sub_runs,
         )
 
     print(f"user: {question}")
